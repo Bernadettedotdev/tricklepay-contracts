@@ -2506,6 +2506,53 @@ fn cancelling_restores_a_decayed_stream_ttl() {
     assert_eq!(t.contract.withdrawable(&id), 500);
 }
 
+/// A cancelled stream still holds the recipient's accrued balance, so a
+/// plain read of it — not just the write inside `cancel` itself — must keep
+/// refreshing the entry, or the record could be archived out from under a
+/// recipient who has not yet come back to withdraw (issue #314).
+#[test]
+fn reading_a_cancelled_stream_below_the_threshold_restores_its_ttl() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    t.set_time(600);
+    assert_eq!(t.contract.cancel(&id), 500);
+    // cancel() itself writes, which already refreshes the entry.
+    assert_eq!(t.stream_ttl(id), ENTRY_TTL);
+
+    // Let the now-cancelled entry decay again.
+    let elapsed = ENTRY_TTL - BUMP_THRESHOLD + 1;
+    t.set_sequence(elapsed);
+    assert!(ENTRY_TTL - elapsed < BUMP_THRESHOLD);
+
+    // A plain view call on the cancelled stream still bumps it.
+    let stream = t.contract.get_stream(&id);
+    assert!(stream.cancelled);
+    assert_eq!(t.stream_ttl(id), ENTRY_TTL);
+
+    // The stream keeps answering well past where it would have been
+    // archived without that bump.
+    t.set_sequence(elapsed + ENTRY_TTL - BUMP_THRESHOLD + 1);
+    assert!(t.contract.get_stream(&id).cancelled);
+}
+
+/// Views authorize nothing, write nothing, and move no tokens, so two
+/// consecutive reads of a stream nobody has touched must be byte-identical.
+/// A refresh that mutated a field (rather than only the entry's TTL) would
+/// show up here (issue #317).
+#[test]
+fn reading_a_stream_twice_returns_identical_data() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    let first = t.contract.get_stream(&id);
+    let second = t.contract.get_stream(&id);
+
+    assert_eq!(first, second);
+}
+
 /// Each stream carries its own entry. Touching one does not extend another, so
 /// an idle stream cannot be kept alive by traffic on a busy one — and, more to
 /// the point, a bump never lands on the wrong key.
