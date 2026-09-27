@@ -67,6 +67,120 @@ the `sender` may call `cancel`; only the `recipient` may call `withdraw` or
 `withdraw_amount`. No other account, including any deployer or admin, holds
 any authority over a stream after it is created.
 
+## Invariants
+
+These properties must hold after every successful call. A reviewer checking a
+change to `contract.rs`, `vesting.rs`, or `storage.rs` should confirm each one
+still holds rather than re-reading the whole contract from scratch.
+
+- **A stream's escrow never exceeds its `total_amount`, and `withdrawn` never
+  exceeds `total_amount`.** `create_stream` deposits exactly `total_amount`
+  from the sender before the record is written (`contract.rs`,
+  `create_stream`). Every later payout — `withdraw`, `withdraw_amount`, and
+  the refund in `cancel` — is sized from `vesting::withdrawable_amount` or
+  `vesting::settlement`, both of which derive from `vested_amount`, which is
+  itself clamped to `[0, total_amount]` (`vesting.rs`). No path adds to
+  `total_amount` or transfers more than the vested-but-unwithdrawn balance.
+- **`withdrawn` only increases.** `withdraw_with` is the only writer of this
+  field (`contract.rs`) and always does `stream.withdrawn += amount` with a
+  non-negative `amount`; nothing ever decrements or resets it.
+- **A cancelled stream never vests further, and cannot be cancelled again.**
+  `cancel` freezes the schedule at the moment of cancellation — `total_amount`
+  is cut down to the vested amount and `end_time` is set to `now`
+  (`contract.rs`, `cancel`) — so `vested_amount` for any later `now` returns
+  the same, already-frozen total. The leading `if stream.cancelled { return
+  Err(StreamError::AlreadyCancelled) }` check makes a second `cancel` a no-op
+  error rather than a second refund.
+- **Only the sender may cancel; only the recipient may withdraw.** Enforced by
+  `stream.sender.require_auth()` in `cancel` and
+  `stream.recipient.require_auth()` in `withdraw_with` (the shared body of
+  `withdraw` and `withdraw_amount`). No other entry point authorizes against
+  a stream's stored `sender`/`recipient`.
+- **A stream id is issued at most once and never reused.** `create_stream`
+  reads `storage::stream_count`, uses that value as the new id, and advances
+  the counter with a checked increment that returns
+  `StreamError::StreamCountExhausted` instead of wrapping
+  (`contract.rs`, `create_stream`; `storage.rs`).
+- **`total_amount` is always positive and within `MAX_AMOUNT`.** Checked once,
+  at creation, before any token moves (`contract.rs`, `create_stream`,
+  `total_amount <= 0` / `total_amount > MAX_AMOUNT`). Nothing after creation
+  can change `total_amount` except `cancel` reducing it downward to the
+  vested amount.
+- **`cliff_time` always falls within `[start_time, end_time]`, and
+  `start_time < end_time`.** Both are checked at creation
+  (`contract.rs`, `create_stream`) and never modified afterward except by
+  `cancel`, which only ever moves them earlier or equal (`start_time.min(now)`,
+  `cliff_time.min(now)`), never outside that relative order.
+
+## Trust assumptions about the token contract
+
+`create_stream` accepts a caller-supplied `token: Address` with no allowlist,
+and every stream stores it: `withdraw`, `withdraw_amount`, and `cancel` all
+invoke that same address later, on the caller's behalf, for the life of the
+stream.
+
+**What is assumed.** The token behaves as a conforming SEP-41 (or Stellar
+Asset Contract) token: `transfer` moves exactly the requested amount between
+the two accounts named, does not charge an undisclosed fee, does not itself
+call back into this contract, and either succeeds or fails atomically with no
+partial effect. The stream contract does not re-check the resulting balances
+after a transfer; it trusts the token's own accounting.
+
+**What a hostile or broken token can do.** Because the token is invoked with
+the stream contract's own authority (the contract is the token's caller for
+outgoing transfers), a token that violates these assumptions can affect that
+stream's participants:
+
+- **Silent short-transfer or an undisclosed fee.** A token that sends less
+  than the requested amount without erroring would let a withdrawal report
+  success while the recipient received less than the vesting math promised.
+  Stream accounting (`withdrawn`, `total_amount`) is unaffected by the actual
+  transferred amount, only by what was requested.
+- **Reentrancy.** A token whose `transfer` invokes back into this contract
+  (for example, from a hook on the recipient) executes before this contract's
+  own state write completes for `create_stream` (transfer precedes the write)
+  but after it for `withdraw`/`withdraw_amount`/`cancel` (see the ordering
+  note below) — a reentrant call in the latter case would read `stream.withdrawn`
+  already updated for the in-flight withdrawal, so a second, concurrent
+  withdrawal of the same accrued balance is not possible. It could still
+  interleave with the schedule (e.g., trigger a `cancel`) in ways not exercised
+  by the test suite.
+- **A token that never returns / always fails.** Every stream created with
+  that token becomes permanently illiquid — no `withdraw`, `withdraw_amount`,
+  or `cancel` can complete, because each aborts the whole call the same way
+  any other transfer failure does (see below). The tokens already deposited
+  stay in the contract, unreachable by either party, for as long as the
+  chosen token remains broken.
+
+**Who is responsible.** The contract enforces no allowlist and performs no
+token-quality checks beyond confirming the address responds to a transfer
+call. Choosing a token is entirely the sender's decision, made at
+`create_stream` time; the contract offers no protection against a
+malicious or defective one, and neither party can change the token on an
+existing stream.
+
+## What happens when a token transfer fails
+
+`withdraw`, `withdraw_amount`, `cancel`, and `create_stream`'s initial deposit
+all call the token's `transfer` through the plain (non-`try_`) client method
+(`contract.rs`, the internal `transfer` helper and `create_stream`). If the
+token contract returns an error or traps, that call itself traps, and Soroban
+aborts the whole host invocation: **the entire transaction is rolled back, not
+just the transfer.** Any storage write this contract made earlier in the same
+call — the new stream record in `create_stream`, the incremented `withdrawn`
+in `withdraw`/`withdraw_amount`, the frozen schedule in `cancel` — is undone
+along with it, because a Soroban invocation only commits state if it returns
+successfully. There is no path that leaves `withdrawn` incremented, or a
+stream marked `cancelled`, while the corresponding transfer never happened.
+
+**What the caller should do.** A failed transfer surfaces as a failed
+transaction, not a typed `StreamError` — the failure is the token's, not this
+contract's, so there is no `StreamError` variant for it. The caller should
+inspect the failed transaction's diagnostic events to see which token call
+failed and why (insufficient balance, no trustline, a frozen asset, or the
+token contract's own error), resolve that condition, and retry the same
+call: since nothing was committed, retrying is safe and not a double-spend.
+
 ## Out-of-scope risks
 
 The following risks exist but are outside the scope of this contract:
