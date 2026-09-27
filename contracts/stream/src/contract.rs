@@ -131,10 +131,8 @@ impl StreamContract {
     /// artefact of how the checks happen to be ordered in the body:
     ///
     /// 1. **Authorization** — `sender` must authorize the call.
-    /// 2. **Participants** — [`StreamError::InvalidParticipant`] if `sender`
-    ///    equals `recipient`, or if `token` equals `sender` or `recipient`,
-    ///    or if any of `sender`, `recipient`, or `token` is this contract's
-    ///    own address.
+    /// 2. **Participants** — [`StreamError::InvalidParticipant`] if any of
+    ///    `sender`, `recipient`, or `token` is this contract's own address.
     /// 3. **Amount** — [`StreamError::InvalidAmount`] if `total_amount` is not
     ///    positive, then [`StreamError::AmountTooLarge`] if it exceeds
     ///    [`MAX_AMOUNT`].
@@ -178,18 +176,47 @@ impl StreamContract {
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
-        // All five rules are checked up front, before a single token moves or a
-        // single storage key is written, so a rejected call leaves no trace.
-        let (id, next_id) = validate_stream_creation(
-            &env,
-            &sender,
-            &recipient,
-            &token,
-            total_amount,
-            start_time,
-            end_time,
-            cliff_time,
-        )?;
+        // 1. Participants. Identity is the most fundamental precondition and
+        //    these are pure comparisons, so they run first.
+        //
+        //    This contract's own address is not valid in any role. Each case
+        //    fails differently — an unclaimable recipient, a token with no
+        //    `transfer` entry point, a sender drawing on the holdings that
+        //    back every other stream — so all three are refused here.
+        let this = env.current_contract_address();
+        if sender == this || recipient == this || token == this {
+            return Err(StreamError::InvalidParticipant);
+        }
+
+        // 2. Amount.
+        if total_amount <= 0 {
+            return Err(StreamError::InvalidAmount);
+        }
+        if total_amount > MAX_AMOUNT {
+            return Err(StreamError::AmountTooLarge);
+        }
+        // 3. Schedule.
+        if start_time >= end_time {
+            return Err(StreamError::InvalidTimeRange);
+        }
+        if cliff_time < start_time || cliff_time > end_time {
+            return Err(StreamError::InvalidCliff);
+        }
+        // Reject a window that is entirely in the past. A stream whose
+        // end_time has already passed would be 100 % vested on creation —
+        // effectively an immediate transfer with extra ceremony. Callers who
+        // genuinely need that should use a token transfer directly.
+        if end_time <= env.ledger().timestamp() {
+            return Err(StreamError::StreamWindowInPast);
+        }
+
+        // 4. Capacity. Reserve the id before any tokens move. The counter is
+        //    the source of every id and never reuses one, so if it were
+        //    allowed to wrap the next stream would be written over a record
+        //    that already exists. Checking here means an exhausted counter
+        //    costs the caller nothing.
+        let id = storage::stream_count(&env);
+        let next_id = id.checked_add(1).ok_or(StreamError::StreamCountExhausted)?;
 
         // Effects. Every rejection above returns before this point, so a
         // failed creation never moves tokens or touches storage.
