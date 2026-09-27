@@ -105,26 +105,21 @@ impl<'a> StreamTest<'a> {
         )
     }
 
-    /// Attempt to create a stream with explicit participant and token
+    /// Assert that creating a stream with explicit participant and token
     /// overrides, using the standard schedule `[100, 1100]` with no cliff and
-    /// `amount`. The raw helper returns `true` if the call was rejected and
-    /// `false` if it succeeded — this keeps tests resilient to SDK client
-    /// return-shape changes.
-    pub fn try_create_stream_for_raw(
+    /// `amount`, fails with the expected contract error.
+    pub fn assert_create_stream_error(
         &self,
         sender: &Address,
         recipient: &Address,
         token: &Address,
         amount: i128,
-    ) -> bool {
+        expected: StreamError,
+    ) {
         let res = self
             .contract
             .try_create_stream(sender, recipient, token, &amount, &100, &1_100, &100);
-        match res {
-            Ok(Ok(_)) => false,
-            Ok(Err(_)) => true,
-            Err(_) => true,
-        }
+        assert_eq!(res, Err(Ok(expected)));
     }
 
     /// The addresses that published the events of the latest invocation, in
@@ -2215,7 +2210,13 @@ fn rejected_create_publishes_no_events() {
     t.set_time(100);
     // sender == recipient is refused by the first validation step.
     let sender = t.sender.clone();
-    assert!(t.try_create_stream_for_raw(&sender, &sender, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &sender,
+        &sender,
+        &t.token_address,
+        1_000,
+        StreamError::InvalidParticipant,
+    );
 
     assert_eq!(t.event_publishers(), vec![&t.env]);
     t.assert_nothing_happened(1_000);
@@ -2230,7 +2231,13 @@ fn rejected_create_on_exhausted_counter_publishes_no_events() {
     t.set_time(100);
     t.set_stream_count(u64::MAX);
 
-    assert!(t.try_create_stream_for_raw(&t.sender, &t.recipient, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        1_000,
+        StreamError::StreamCountExhausted,
+    );
 
     assert_eq!(t.event_publishers(), vec![&t.env]);
 }
@@ -2420,7 +2427,13 @@ fn rejected_create_writes_no_storage_key() {
     t.set_time(100);
 
     let contract_address = t.contract.address.clone();
-    assert!(t.try_create_stream_for_raw(&t.sender, &contract_address, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &t.sender,
+        &contract_address,
+        &t.token_address,
+        1_000,
+        StreamError::InvalidParticipant,
+    );
 
     assert!(!t.persistent_has(&DataKey::Stream(0)));
     t.assert_nothing_happened(1_000);
