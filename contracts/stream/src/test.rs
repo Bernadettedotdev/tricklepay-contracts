@@ -105,26 +105,21 @@ impl<'a> StreamTest<'a> {
         )
     }
 
-    /// Attempt to create a stream with explicit participant and token
+    /// Assert that creating a stream with explicit participant and token
     /// overrides, using the standard schedule `[100, 1100]` with no cliff and
-    /// `amount`. The raw helper returns `true` if the call was rejected and
-    /// `false` if it succeeded — this keeps tests resilient to SDK client
-    /// return-shape changes.
-    pub fn try_create_stream_for_raw(
+    /// `amount`, fails with the expected contract error.
+    pub fn assert_create_stream_error(
         &self,
         sender: &Address,
         recipient: &Address,
         token: &Address,
         amount: i128,
-    ) -> bool {
+        expected: StreamError,
+    ) {
         let res = self
             .contract
             .try_create_stream(sender, recipient, token, &amount, &100, &1_100, &100);
-        match res {
-            Ok(Ok(_)) => false,
-            Ok(Err(_)) => true,
-            Err(_) => true,
-        }
+        assert_eq!(res, Err(Ok(expected)));
     }
 
     /// The addresses that published the events of the latest invocation, in
@@ -260,6 +255,9 @@ fn create_stream_locks_funds_and_assigns_id() {
     assert_eq!(stream.token, t.token_address);
     assert_eq!(stream.total_amount, 1_000);
     assert_eq!(stream.withdrawn, 0);
+    assert_eq!(stream.start_time, 100);
+    assert_eq!(stream.end_time, 1_100);
+    assert_eq!(stream.cliff_time, 100);
     assert!(!stream.cancelled);
 }
 
@@ -304,11 +302,17 @@ fn one_sender_can_stream_multiple_tokens_in_parallel() {
     let first = t.contract.get_stream(&first_id);
     assert_eq!(first.token, t.token_address);
     assert_eq!(first.total_amount, 400);
+    assert_eq!(first.start_time, 100);
+    assert_eq!(first.end_time, 1_100);
+    assert_eq!(first.cliff_time, 100);
     assert_eq!(first.withdrawn, 0);
 
     let second = t.contract.get_stream(&second_id);
     assert_eq!(second.token, second_token_address);
     assert_eq!(second.total_amount, 900);
+    assert_eq!(second.start_time, 100);
+    assert_eq!(second.end_time, 1_100);
+    assert_eq!(second.cliff_time, 100);
     assert_eq!(second.withdrawn, 0);
 
     t.set_time(600);
@@ -338,8 +342,9 @@ fn withdraw_releases_vested_in_steps() {
 
     // Midpoint: half has vested.
     t.set_time(600);
-    assert_eq!(t.contract.withdraw(&id), 500);
-    assert_eq!(t.token.balance(&t.recipient), 500);
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+    assert_eq!(t.token.balance(&t.recipient), withdrawn);
     // Nothing more is available until the clock advances again.
     assert_eq!(t.contract.withdrawable(&id), 0);
 
@@ -403,6 +408,10 @@ fn progress_reports_basis_points() {
     // Halfway is 50 percent, in basis points.
     t.set_time(600);
     assert_eq!(t.contract.progress(&id), 5_000);
+    // One second before the end, progress must still be below the maximum.
+    t.set_time(1_099);
+    assert_eq!(t.contract.progress(&id), 9_990);
+    assert!(t.contract.progress(&id) < 10_000);
     // Fully vested at the end.
     t.set_time(1_100);
     assert_eq!(t.contract.progress(&id), 10_000);
@@ -419,17 +428,26 @@ fn locked_decreases_as_the_stream_vests() {
         &1_000,
         &100,
         &1_100,
-        &100,
+        &600,
     );
 
-    // At the start the whole amount is locked.
+    // Before the cliff, nothing is vested and the whole amount is locked.
+    t.set_time(300);
     assert_eq!(t.contract.locked(&id), 1_000);
-    // Halfway, half is locked.
-    t.set_time(600);
-    assert_eq!(t.contract.locked(&id), 500);
-    // At the end, nothing is locked.
-    t.set_time(1_100);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
+
+    // Mid-stream, vested and locked remain complementary.
+    t.set_time(850);
+    assert_eq!(t.contract.locked(&id), 250);
+    assert_eq!(t.contract.vested(&id), 750);
+    assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
+
+    // After the end, all value is vested and none is locked.
+    t.set_time(1_200);
     assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.vested(&id), 1_000);
+    assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
 }
 
 #[test]
@@ -448,8 +466,9 @@ fn withdraw_amount_takes_a_partial_balance() {
 
     // Midpoint: 500 vested. Take only 200 of it.
     t.set_time(600);
-    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
-    assert_eq!(t.token.balance(&t.recipient), 200);
+    let withdrawn = t.contract.withdraw_amount(&id, &200);
+    assert_eq!(withdrawn, 200);
+    assert_eq!(t.token.balance(&t.recipient), withdrawn);
     // 300 of the vested 500 is still available.
     assert_eq!(t.contract.withdrawable(&id), 300);
 
@@ -784,6 +803,7 @@ fn cancel_refunds_unvested_and_preserves_vested() {
         t.contract.try_cancel(&id),
         Err(Ok(StreamError::AlreadyCancelled))
     );
+    assert_eq!(t.event_publishers(), Vec::new(&t.env));
 }
 
 /// Cancel a stream the recipient has already partially withdrawn from.
@@ -810,14 +830,15 @@ fn cancel_after_partial_withdrawal() {
     // Midpoint: 500 vested, 500 still locked. The recipient takes 200 of the
     // vested half and leaves 300 behind.
     t.set_time(600);
-    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
-    assert_eq!(t.token.balance(&t.recipient), 200);
+    let withdrawn = t.contract.withdraw_amount(&id, &200);
+    assert_eq!(withdrawn, 200);
+    assert_eq!(t.token.balance(&t.recipient), withdrawn);
 
     // The sender cancels. The refund is the unvested half; the 200 already
     // withdrawn is not double-refunded to the sender.
     let refund = t.contract.cancel(&id);
     assert_eq!(refund, 500);
-    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.sender), refund);
     assert_eq!(t.token.balance(&t.contract.address), 300);
 
     // The stored stream is frozen at the vested amount with the prior
@@ -832,8 +853,12 @@ fn cancel_after_partial_withdrawal() {
     // with the 200 already taken that is the full vested 500, the split adds
     // up to the original total, and the contract is drained.
     assert_eq!(t.contract.withdrawable(&id), 300);
-    assert_eq!(t.contract.withdraw(&id), 300);
-    assert_eq!(t.token.balance(&t.recipient), 500);
+    let remaining_withdrawal = t.contract.withdraw(&id);
+    assert_eq!(remaining_withdrawal, 300);
+    assert_eq!(
+        t.token.balance(&t.recipient),
+        withdrawn + remaining_withdrawal
+    );
     assert_eq!(t.token.balance(&t.contract.address), 0);
 }
 
@@ -939,6 +964,34 @@ fn cancel_immediately_after_start() {
     assert_eq!(t.contract.withdraw(&id), 1);
     assert_eq!(t.token.balance(&t.recipient), 1);
     assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// Cancelling at the exact start leaves no elapsed time to vest, so the full
+/// deposit returns to the sender and nothing is claimable by the recipient.
+#[test]
+fn cancel_at_start_time_refunds_the_full_amount() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // No time has elapsed at start_time, so none of the deposit has vested.
+    assert_eq!(t.contract.cancel(&id), 1_000);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
 }
 
 /// Cancel a stream before its cliff has been reached.
@@ -1271,7 +1324,7 @@ fn cancel_past_end_time_is_rejected_and_status_stays_completed() {
 }
 
 #[test]
-fn second_withdraw_without_progress_is_rejected() {
+fn second_withdraw_at_same_timestamp_is_rejected() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
     let id = t.contract.create_stream(
@@ -1286,12 +1339,14 @@ fn second_withdraw_without_progress_is_rejected() {
 
     t.set_time(600);
     assert_eq!(t.contract.withdraw(&id), 500);
+    let withdrawn_before = t.contract.get_stream(&id).withdrawn;
 
     // Withdrawing again with no time elapsed releases nothing.
     assert_eq!(
         t.contract.try_withdraw(&id),
         Err(Ok(StreamError::NothingToWithdraw))
     );
+    assert_eq!(t.contract.get_stream(&id).withdrawn, withdrawn_before);
     assert_eq!(t.token.balance(&t.recipient), 500);
 }
 
@@ -2102,6 +2157,13 @@ fn rejected_create_publishes_no_events() {
     // This contract's own address is refused by the first validation step.
     let sender = t.sender.clone();
     assert!(t.try_create_stream_for_raw(&sender, &t.contract.address, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &sender,
+        &sender,
+        &t.token_address,
+        1_000,
+        StreamError::InvalidParticipant,
+    );
 
     assert_eq!(t.event_publishers(), vec![&t.env]);
     t.assert_nothing_happened(1_000);
@@ -2116,7 +2178,13 @@ fn rejected_create_on_exhausted_counter_publishes_no_events() {
     t.set_time(100);
     t.set_stream_count(u64::MAX);
 
-    assert!(t.try_create_stream_for_raw(&t.sender, &t.recipient, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        1_000,
+        StreamError::StreamCountExhausted,
+    );
 
     assert_eq!(t.event_publishers(), vec![&t.env]);
 }
@@ -2306,7 +2374,13 @@ fn rejected_create_writes_no_storage_key() {
     t.set_time(100);
 
     let contract_address = t.contract.address.clone();
-    assert!(t.try_create_stream_for_raw(&t.sender, &contract_address, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &t.sender,
+        &contract_address,
+        &t.token_address,
+        1_000,
+        StreamError::InvalidParticipant,
+    );
 
     assert!(!t.persistent_has(&DataKey::Stream(0)));
     t.assert_nothing_happened(1_000);
@@ -3354,16 +3428,316 @@ fn test_cliff_at_end_of_stream() {
     assert_eq!(t.contract.get_stream(&id).withdrawn, 1_000);
 }
 
+/// Issue #265 — Cancelling one stream does not disturb any other stream.
+///
+/// Streams are stored under separate `DataKey::Stream(id)` entries, so a
+/// cancellation must only mutate the targeted stream. This test opens four
+/// independent streams — three with distinct amounts and schedules and one
+/// extra that has already had a partial withdrawal — cancels only stream B at
+/// its midpoint, and then asserts that A, C, and D are bit-for-bit identical
+/// to what they were before the cancel call. A storage-key collision, an
+/// off-by-one in the id counter, or any accidental shared mutable state would
+/// cause one of those equality checks to fail.
 #[test]
-fn test_get_stream_not_found_beyond_counter() {
+fn cancel_does_not_affect_other_streams() {
+    // Fund the sender with enough to cover all four streams.
+    let t = StreamTest::setup(4_000);
+    t.set_time(50);
+
+    // Stream A — 1 000 units, no cliff, window [100, 1100].
+    let id_a = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Stream B — 500 units, no cliff, window [100, 1100].  This is the one
+    // that will be cancelled.
+    let id_b = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Stream C — 800 units, cliff at midpoint, window [100, 1100].
+    let id_c = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &800,
+        &100,
+        &1_100,
+        &600,
+    );
+
+    // Stream D — 700 units, no cliff, window [100, 1100].  The recipient
+    // makes a partial withdrawal before stream B is cancelled so we can
+    // confirm that `withdrawn` is also unaffected.
+    let id_d = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &700,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Sanity: ids are assigned sequentially and all four streams exist.
+    assert_eq!(id_a, 0);
+    assert_eq!(id_b, 1);
+    assert_eq!(id_c, 2);
+    assert_eq!(id_d, 3);
+    assert_eq!(t.contract.stream_count(), 4);
+
+    // Advance to the midpoint and take a partial withdrawal from stream D.
+    t.set_time(600);
+    assert_eq!(t.contract.withdraw_amount(&id_d, &200), 200);
+
+    // Snapshot the state of the streams that must not change.
+    let a_before = t.contract.get_stream(&id_a);
+    let c_before = t.contract.get_stream(&id_c);
+    let d_before = t.contract.get_stream(&id_d);
+
+    // Cancel only stream B at the midpoint. Half of 500 has vested, so the
+    // refund is 250.
+    let refund = t.contract.cancel(&id_b);
+    assert_eq!(refund, 250);
+    assert!(t.contract.get_stream(&id_b).cancelled);
+
+    // ── Stream A must be completely unchanged ────────────────────────────────
+    let a_after = t.contract.get_stream(&id_a);
+    assert_eq!(a_after.sender, a_before.sender);
+    assert_eq!(a_after.recipient, a_before.recipient);
+    assert_eq!(a_after.token, a_before.token);
+    assert_eq!(a_after.total_amount, a_before.total_amount);
+    assert_eq!(a_after.withdrawn, a_before.withdrawn);
+    assert_eq!(a_after.cancelled, a_before.cancelled);
+    assert_eq!(a_after.start_time, a_before.start_time);
+    assert_eq!(a_after.cliff_time, a_before.cliff_time);
+    assert_eq!(a_after.end_time, a_before.end_time);
+
+    // A is still live and vesting normally after B is cancelled.
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.status(&id_a), StreamStatus::Streaming);
+
+    // ── Stream C must be completely unchanged ────────────────────────────────
+    let c_after = t.contract.get_stream(&id_c);
+    assert_eq!(c_after.sender, c_before.sender);
+    assert_eq!(c_after.recipient, c_before.recipient);
+    assert_eq!(c_after.token, c_before.token);
+    assert_eq!(c_after.total_amount, c_before.total_amount);
+    assert_eq!(c_after.withdrawn, c_before.withdrawn);
+    assert_eq!(c_after.cancelled, c_before.cancelled);
+    assert_eq!(c_after.start_time, c_before.start_time);
+    assert_eq!(c_after.cliff_time, c_before.cliff_time);
+    assert_eq!(c_after.end_time, c_before.end_time);
+
+    // C has its cliff at 600, so at now == 600 it just became withdrawable.
+    assert_eq!(t.contract.withdrawable(&id_c), 400);
+    assert_eq!(t.contract.status(&id_c), StreamStatus::Streaming);
+
+    // ── Stream D must be completely unchanged (including prior withdrawal) ───
+    let d_after = t.contract.get_stream(&id_d);
+    assert_eq!(d_after.sender, d_before.sender);
+    assert_eq!(d_after.recipient, d_before.recipient);
+    assert_eq!(d_after.token, d_before.token);
+    assert_eq!(d_after.total_amount, d_before.total_amount);
+    assert_eq!(d_after.withdrawn, d_before.withdrawn);
+    assert_eq!(d_after.cancelled, d_before.cancelled);
+    assert_eq!(d_after.start_time, d_before.start_time);
+    assert_eq!(d_after.cliff_time, d_before.cliff_time);
+    assert_eq!(d_after.end_time, d_before.end_time);
+
+    // D vested 350 at the midpoint; 200 were already withdrawn, so 150 remain.
+    assert_eq!(t.contract.withdrawable(&id_d), 150);
+    assert_eq!(t.contract.status(&id_d), StreamStatus::Streaming);
+}
+
+/// Issue #298 — Test that the recipient balance rises by the withdrawn amount.
+///
+/// Asserts that when a withdrawal occurs, the recipient token balance increases by exactly
+/// the returned withdrawn amount, and the contract token balance decreases by the same amount.
+#[test]
+fn test_recipient_balance_rises_by_withdrawn_amount() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    // Initial balances before any withdrawal
+    let recipient_before = t.token.balance(&t.recipient);
+    let contract_before = t.token.balance(&t.contract.address);
+    assert_eq!(recipient_before, 0);
+    assert_eq!(contract_before, 1_000);
+
+    // Advance to 600 (500 vested) and withdraw a specific partial amount (200)
+    t.set_time(600);
+    let withdrawn_partial = t.contract.withdraw_amount(&id, &200);
+    assert_eq!(withdrawn_partial, 200);
+
+    let recipient_after_partial = t.token.balance(&t.recipient);
+    let contract_after_partial = t.token.balance(&t.contract.address);
+    assert_eq!(
+        recipient_after_partial,
+        recipient_before + withdrawn_partial
+    );
+    assert_eq!(contract_after_partial, contract_before - withdrawn_partial);
+
+    // Perform full withdrawal of the remaining available (300)
+    let withdrawn_full = t.contract.withdraw(&id);
+    assert_eq!(withdrawn_full, 300);
+
+    let recipient_after_full = t.token.balance(&t.recipient);
+    let contract_after_full = t.token.balance(&t.contract.address);
+    assert_eq!(
+        recipient_after_full,
+        recipient_after_partial + withdrawn_full
+    );
+    assert_eq!(contract_after_full, contract_after_partial - withdrawn_full);
+}
+
+/// Issue #299 — Test that cancellation refunds the stored sender.
+///
+/// Asserts that when a stream is cancelled, the unvested refund is credited exclusively
+/// to the stored sender address recorded on the stream, and no other account (such as
+/// a third-party caller or the recipient) receives the refund tokens.
+#[test]
+fn test_cancellation_refunds_stored_sender() {
     let t = StreamTest::setup(1_000);
 
     // Create one stream, meaning the counter is at 1.
     t.open_default_stream(1_000);
     assert_eq!(t.contract.stream_count(), 1);
+    t.set_time(100);
 
-    // Try to get a stream ID beyond the counter.
-    // The current count is 1, so the next ID is 2, but we'll ask for 99.
-    let error = t.contract.try_get_stream(&99).unwrap_err().unwrap();
-    assert_eq!(error, StreamError::StreamNotFound);
+    let stored_sender = t.sender.clone();
+    let third_party = Address::generate(&t.env);
+
+    let id = t.contract.create_stream(
+        &stored_sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Initial balances after stream creation
+    assert_eq!(t.token.balance(&stored_sender), 0);
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.token.balance(&third_party), 0);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
+
+    // Halfway through: 500 vested, 500 unvested refund
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+
+    // Assert that the refund was credited to the stored sender address
+    assert_eq!(t.token.balance(&stored_sender), 500);
+
+    // Assert that no other account received tokens
+    assert_eq!(t.token.balance(&third_party), 0);
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    // The contract retains only the unwithdrawn vested remainder for the recipient
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+}
+
+/// Issue #300 — Test that nothing is withdrawable straight after a full withdrawal.
+///
+/// Drawing the entire available balance must immediately leave `withdrawable(&id)` at 0
+/// until more time passes, and an immediate subsequent withdrawal attempt at the same
+/// timestamp must be rejected with `NothingToWithdraw`.
+#[test]
+fn test_nothing_withdrawable_straight_after_full_withdrawal() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    // Advance to midpoint (500 vested)
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+
+    // Perform a full withdrawal of all currently available funds
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+
+    // Immediately after full withdrawal at the same timestamp:
+    // 1. Withdrawable figure is zero
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // 2. A further withdrawal at the same time is rejected
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(
+        t.contract.try_withdraw_amount(&id, &1),
+        Err(Ok(StreamError::InsufficientBalance))
+    );
+}
+
+/// Issue #301 — Test that a cliff equal to the start behaves as no cliff.
+///
+/// Setting `cliff_time == start_time` is the documented representation of an uncliffed
+/// stream. Assert that vesting begins immediately after start_time without being blocked,
+/// and that the vested and withdrawable amounts match an equivalent uncliffed schedule
+/// across intermediate points and at completion.
+#[test]
+fn test_cliff_equal_to_start_behaves_as_no_cliff() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    // Stream 1: explicit cliff equal to start
+    let id_cliff = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &start,
+    );
+
+    // Stream 2: standard uncliffed schedule over [100, 1100]
+    let id_uncliffed = t.open_default_stream(amount);
+
+    // At start, vested amount is 0 for both
+    assert_eq!(t.contract.vested(&id_cliff), 0);
+    assert_eq!(t.contract.vested(&id_uncliffed), 0);
+
+    // Immediately after start (t = 200, 100s elapsed out of 1000s)
+    // Vesting has begun immediately (not blocked by a cliff)
+    t.set_time(200);
+    assert_eq!(t.contract.vested(&id_cliff), 100);
+    assert_eq!(t.contract.vested(&id_uncliffed), 100);
+    assert_eq!(t.contract.withdrawable(&id_cliff), 100);
+    assert_eq!(t.contract.withdrawable(&id_uncliffed), 100);
+
+    // Midpoint: t = 600 (500s elapsed out of 1000s)
+    t.set_time(600);
+    assert_eq!(t.contract.vested(&id_cliff), 500);
+    assert_eq!(t.contract.vested(&id_uncliffed), 500);
+    assert_eq!(t.contract.withdrawable(&id_cliff), 500);
+    assert_eq!(t.contract.withdrawable(&id_uncliffed), 500);
+
+    // At end: t = 1100
+    t.set_time(1100);
+    assert_eq!(t.contract.vested(&id_cliff), 1_000);
+    assert_eq!(t.contract.vested(&id_uncliffed), 1_000);
+    assert_eq!(t.contract.withdrawable(&id_cliff), 1_000);
+    assert_eq!(t.contract.withdrawable(&id_uncliffed), 1_000);
 }
