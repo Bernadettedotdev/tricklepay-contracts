@@ -2022,7 +2022,19 @@ fn withdraw_amount_emits_withdrawn_after_the_payout_transfer() {
     let id = t.open_default_stream(1_000);
 
     t.set_time(600);
-    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
+    let recipient_balance_before = t.token.balance(&t.recipient);
+    let withdrawn = t.contract.withdraw_amount(&id, &200);
+    let transferred = t.token.balance(&t.recipient) - recipient_balance_before;
+
+    assert_eq!(withdrawn, transferred);
+    t.assert_latest_stream_event_topics(
+        Withdrawn {
+            recipient: t.recipient.clone(),
+            id,
+            amount: transferred,
+        }
+        .to_xdr(&t.env, &t.contract.address),
+    );
 
     assert_eq!(t.event_publishers(), t.transfer_then_announce());
 }
