@@ -199,6 +199,24 @@ mod tests {
         assert_eq!(vested_amount(TOTAL, START, END, END, END), TOTAL);
     }
 
+    /// A one-base-unit stream is the smallest meaningful schedule: every
+    /// interim value is rounded down to zero until the stream closes, then the
+    /// final unit becomes fully withdrawable. This is not a bug; it is the
+    /// expected result of floor division on a one-token total spread over a
+    /// longer duration.
+    #[test]
+    fn one_base_unit_stream_rounds_down_until_the_end() {
+        let total = 1_i128;
+        let start = 100_u64;
+        let end = 1_100_u64;
+
+        assert_eq!(vested_amount(total, start, end, start, start), 0);
+        assert_eq!(vested_amount(total, start, end, start, start + 1), 0);
+        assert_eq!(vested_amount(total, start, end, start, end - 1), 0);
+        assert_eq!(vested_amount(total, start, end, start, end), 1);
+        assert_eq!(withdrawable_amount(vested_amount(total, start, end, start, end), 0), 1);
+    }
+
     #[test]
     fn integer_division_rounds_down() {
         // 10 * 1 / 3 = 3.33, truncated to 3.
