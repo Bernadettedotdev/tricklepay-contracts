@@ -467,6 +467,31 @@ fn locked_decreases_as_the_stream_vests() {
 }
 
 #[test]
+fn locked_never_goes_negative_across_sampled_times() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &600,
+    );
+
+    for now in [100u64, 300, 600, 850, 1_100, 1_200] {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        let locked = t.contract.locked(&id);
+        assert!(locked >= 0, "locked={} vested={} at time={}", locked, vested, now);
+        assert_eq!(locked, (1_000 - vested).max(0));
+    }
+
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
+#[test]
 fn withdraw_amount_takes_a_partial_balance() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
