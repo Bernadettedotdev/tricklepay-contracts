@@ -264,34 +264,6 @@ impl StreamContract {
             }
             Ok(available)
         })
-        let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        stream.recipient.require_auth();
-
-        let now = env.ledger().timestamp();
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            now,
-        );
-        let available = vesting::withdrawable_amount(vested, stream.withdrawn);
-        if available <= 0 {
-            return Err(StreamError::NothingToWithdraw);
-        }
-
-        stream.withdrawn += available;
-        storage::set_stream(&env, id, &stream);
-
-        TokenClient::new(&env, &stream.token).transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &available,
-        );
-
-        events::publish_withdrawn(&env, &stream.recipient, id, available);
-
-        Ok(available)
     }
 
     /// Withdraw a specific amount, up to what has vested.
@@ -317,38 +289,6 @@ impl StreamContract {
             }
             Ok(amount)
         })
-        let mut stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        stream.recipient.require_auth();
-
-        if amount <= 0 {
-            return Err(StreamError::InvalidAmount);
-        }
-
-        let now = env.ledger().timestamp();
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            now,
-        );
-        let available = vesting::withdrawable_amount(vested, stream.withdrawn);
-        if amount > available {
-            return Err(StreamError::InsufficientBalance);
-        }
-
-        stream.withdrawn += amount;
-        storage::set_stream(&env, id, &stream);
-
-        TokenClient::new(&env, &stream.token).transfer(
-            &env.current_contract_address(),
-            &stream.recipient,
-            &amount,
-        );
-
-        events::publish_withdrawn(&env, &stream.recipient, id, amount);
-
-        Ok(amount)
     }
 
     /// Cancel a stream and refund the unvested remainder to the sender.
@@ -405,14 +345,13 @@ impl StreamContract {
             );
         }
 
-        events::Cancelled {
-            sender: stream.sender.clone(),
+        events::publish_cancelled(
+            &env,
+            &stream.sender,
             id,
-            recipient_amount: settlement.recipient_remaining,
-            sender_refund: settlement.refund,
-        }
-        .publish(&env);
-        events::publish_cancelled(&env, &stream.sender, id, recipient_remaining, refund);
+            settlement.recipient_remaining,
+            settlement.refund,
+        );
 
         Ok(settlement.refund)
     }

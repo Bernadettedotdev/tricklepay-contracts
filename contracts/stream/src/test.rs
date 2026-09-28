@@ -105,6 +105,22 @@ impl<'a> StreamTest<'a> {
         )
     }
 
+    /// Exercise a raw `create_stream` call and confirm the contract rejects it
+    /// without panicking. The helper is intentionally written to return a bool
+    /// so tests can assert on the failed invocation as a smoke test before
+    /// checking the exact contract error separately.
+    pub fn try_create_stream_for_raw(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> bool {
+        self.contract
+            .try_create_stream(sender, recipient, token, &amount, &100, &1_100, &100)
+            .is_err()
+    }
+
     /// Assert that creating a stream with explicit participant and token
     /// overrides, using the standard schedule `[100, 1100]` with no cliff and
     /// `amount`, fails with the expected contract error.
@@ -515,6 +531,43 @@ fn withdraw_amount_takes_a_partial_balance() {
         contract_balance_before
     );
     assert_eq!(t.contract.get_stream(&id).withdrawn, withdrawn_before);
+}
+
+#[test]
+fn withdrawable_never_exceeds_vested_across_sampled_times_and_partial_withdrawal() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    for now in [100u64, 300, 600, 850, 1_100] {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        let withdrawable = t.contract.withdrawable(&id);
+        assert!(withdrawable <= vested, "withdrawable={} vested={} at time={}", withdrawable, vested, now);
+    }
+
+    t.set_time(600);
+    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
+    let vested = t.contract.vested(&id);
+    let withdrawable = t.contract.withdrawable(&id);
+    assert_eq!(vested, 500);
+    assert_eq!(withdrawable, 300);
+    assert!(withdrawable <= vested);
+
+    t.set_time(850);
+    let vested = t.contract.vested(&id);
+    let withdrawable = t.contract.withdrawable(&id);
+    assert_eq!(vested, 750);
+    assert_eq!(withdrawable, 550);
+    assert!(withdrawable <= vested);
 }
 
 #[test]
