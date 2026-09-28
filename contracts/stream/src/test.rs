@@ -2241,14 +2241,18 @@ fn cancelled_event_topics_index_sender() {
     let id = t.open_default_stream(1_000);
 
     t.set_time(600);
+    let recipient_amount = 500;
     let refund = t.contract.cancel(&id);
 
-    assert_eq!(refund, 500);
+    assert_eq!(refund, recipient_amount);
+    // At the midpoint, the remaining escrow is split cleanly between the
+    // recipient's accrued share and the sender's refund.
+    assert_eq!(recipient_amount + refund, 1_000);
     t.assert_latest_stream_event_topics(
         Cancelled {
             sender: t.sender.clone(),
             id,
-            recipient_amount: 500,
+            recipient_amount,
             sender_refund: refund,
         }
         .to_xdr(&t.env, &t.contract.address),
