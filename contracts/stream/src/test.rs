@@ -1474,6 +1474,7 @@ fn create_stream_accepts_max_amount() {
 
     // At end_time the full amount is vested and withdrawable without panic.
     t.set_time(101);
+    assert_eq!(t.contract.vested(&id), MAX_AMOUNT);
     assert_eq!(t.contract.withdrawable(&id), MAX_AMOUNT);
     assert_eq!(t.contract.withdraw(&id), MAX_AMOUNT);
     assert_eq!(t.token.balance(&t.recipient), MAX_AMOUNT);
