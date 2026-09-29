@@ -4139,4 +4139,10 @@ fn cancel_fully_drawn_stream_refunds_nothing() {
     t.set_time(1_100);
     let withdrawn = t.contract.withdraw(&id);
     assert_eq!(withdrawn, 1_000);
+
+    // The stream is fully drawn. Attempt to cancel.
+    let res = t.contract.try_cancel(&id);
+    
+    // Cancelling should refuse (or return 0). In this case it refuses because it's already completed.
+    assert_eq!(res, Err(Ok(StreamError::StreamAlreadyCompleted)));
 }
