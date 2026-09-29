@@ -1,0 +1,458 @@
+Env Meta: AAAAAAAAABkAAAAA
+ • Protocol Version: 25
+
+Contract Meta:
+ • rsver: 1.96.0
+ • rssdkver: 25.3.2#076083c6fe32ab89660da9eb90f34445eea46079
+
+Contract Spec:
+ • Error: StreamError
+     Docs: Errors returned by the stream contract.\n\nEach variant maps to a stable integer code so that callers and\noff-chain indexers can match on a value that does not change between\nbuilds.\n\nAuthorization failures are deliberately not represented here. Access\ncontrol is enforced with `require_auth()`, which panics with a host auth\nerror before the entry point body runs, so an unauthorized call never\nreturns one of these codes. Code 2 was an `Unauthorized` variant that\nnothing ever constructed; it is retired and must not be reused, which is\nwhy the codes below skip it rather than close the gap.\n\n# Interface stability\n\nEvery discriminant below is written out explicitly and is part of the\ncontract's public interface: clients, SDKs and indexers map these integer\ncodes to errors, so each code must mean the same thing for the life of the\ncontract.\n\n**Values must never be reused or reordered.** Do not renumber a variant,\ndo not insert a variant with an existing value, and do not give a retired\nvalue (such as `2`) to a new va
+     Cases:
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(No stream exists for the requested identifier.\n\nInterface code `1`.),
+            name: StringM(StreamNotFound),
+            value: 1,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The start time is not strictly before the end time.\n\nInterface code `3`.),
+            name: StringM(InvalidTimeRange),
+            value: 3,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The total amount is zero or negative.\n\nInterface code `4`.),
+            name: StringM(InvalidAmount),
+            value: 4,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The cliff falls outside the stream's start and end window.\n\nInterface code `5`.),
+            name: StringM(InvalidCliff),
+            value: 5,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The stream has already been cancelled.\n\nInterface code `6`.),
+            name: StringM(AlreadyCancelled),
+            value: 6,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(There is nothing available to withdraw right now.\n\nInterface code `7`.),
+            name: StringM(NothingToWithdraw),
+            value: 7,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The requested withdrawal is larger than the available balance.\n\nInterface code `8`.),
+            name: StringM(InsufficientBalance),
+            value: 8,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The stream has already completed (now >= end_time) and cannot be cancelled.\n\nInterface code `9`.),
+            name: StringM(StreamAlreadyCompleted),
+            value: 9,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(`total_amount` exceeds the maximum allowed value.\n\nThe vesting calculation multiplies `total_amount` by an elapsed-time\nvalue that can be as large as `u64::MAX`. Capping amounts at `i64::MAX`\nguarantees the product never overflows `i128`, because\n`i64::MAX * u64::MAX < i128::MAX`.\n\nInterface code `10`.),
+            name: StringM(AmountTooLarge),
+            value: 10,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The stream's time window ends entirely in the past.\n\n`end_time` is before the current ledger timestamp, meaning the stream\nwould be 100 % vested the moment it is created \xe2\x80\x94 effectively an\nimmediate transfer. Use a token transfer directly instead.\n\nInterface code `11`.),
+            name: StringM(StreamWindowInPast),
+            value: 11,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(The stream counter has no ids left to assign.\n\nIds come from a monotonic `u64` counter that never reuses a value. Once\nit reaches `u64::MAX` no further stream can be opened: incrementing\npast that point would wrap to zero and hand out ids that already exist\nin storage, silently overwriting live streams. Reaching this bound\nrequires `u64::MAX` successful creations and is not realistic in\npractice, but the contract fails closed rather than corrupt existing\nrecords.\n\nInterface code `12`.),
+            name: StringM(StreamCountExhausted),
+            value: 12,
+        }
+      • ScSpecUdtErrorEnumCaseV0 {
+            doc: StringM(A participant address is not valid for the role it was given.\n\nReturned when `sender` and `recipient` are the same address: such a\nstream only locks the sender's own tokens and returns them over time,\nwhich is almost always a swapped or unset argument rather than an\nintent.\n\nAlso returned when the stream contract's own address appears as\n`sender`, `recipient`, or `token`. As `recipient` the stream would be permanently\nunwithdrawable: `withdraw` requires the recipient's authorization and\nthe contract cannot sign for itself, so the locked tokens would have no\nclaimant. As `token` it would mean invoking `transfer` on this\ncontract, which exposes no such entry point. As `sender` a caller could\ndraw on the contract's own holdings, which back every other stream.\n\nAlso returned when the token address appears as `sender` or `recipient`:\na token contract cannot act as a stream participant, and attempting to\nstream a token to or from its own address is an invalid configuration.\n\nInterface code `13`.),
+            name: StringM(InvalidParticipant),
+            value: 13,
+        }
+
+ • Struct: Stream
+     Docs: A single token stream from a sender to a recipient.\n\nTokens vest linearly from `start_time` to `end_time`. The recipient may\nwithdraw whatever has vested but not yet been taken at any point. The\nsender may cancel, which stops further vesting and returns the unvested\nremainder.\n\nAll amounts are in the token's smallest unit (stroops for the native\nasset). All times are Unix timestamps in seconds, matching the ledger\nclock exposed by `env.ledger().timestamp()`.
+     Fields:
+      • cancelled: Bool
+        StringM(`true` once the sender has cancelled the stream.\n\nWhen `true`, `total_amount` holds only the vested portion at the\nmoment of cancellation (the unvested remainder was refunded to the\nsender). The recipient may still withdraw any remaining vested balance\nafter cancellation. A cancelled stream cannot be cancelled again.)
+      • cliff_time: U64
+        StringM(Unix timestamp in seconds before which nothing may be withdrawn.\n\nWhen the ledger time reaches `cliff_time`, all tokens that have\naccrued since `start_time` unlock at once and vesting continues\nlinearly from there. Set equal to `start_time` for a stream with no\ncliff; in that case the gate is vacuous and vesting proceeds linearly\nfrom the start. Must lie within `[start_time, end_time]`.)
+      • end_time: U64
+        StringM(Unix timestamp in seconds at which the stream is fully vested.\n\nAt or after this moment the entire `total_amount` has vested and the\nrecipient may withdraw the remaining balance in one call. Must be\nstrictly greater than `start_time` and strictly in the future at the\ntime `create_stream` is called.)
+      • recipient: Address
+        StringM(Account that accrues and withdraws the streamed tokens.\n\nOnly this address is authorised to call `withdraw` and\n`withdraw_amount`.)
+      • sender: Address
+        StringM(Account that funded the stream and may cancel it.\n\nOnly this address is authorised to call `cancel`.)
+      • start_time: U64
+        StringM(Unix timestamp in seconds at which linear vesting begins.\n\nBefore this moment nothing has vested. A `start_time` in the past is\naccepted at creation; the elapsed portion vests immediately.)
+      • token: Address
+        StringM(Address of the SEP-41 token contract whose balance is being streamed.)
+      • total_amount: I128
+        StringM(The amount available for vesting, in the token's smallest unit\n(stroops for the native asset).\n\nOn an active stream this equals the amount locked at creation. On a\ncancelled stream this field is frozen at the vested amount at the\nmoment of cancellation \xe2\x80\x94 the unvested remainder has already been\nrefunded to the sender and is no longer reflected here. Callers\nmust not assume this equals the original deposit after cancellation.)
+      • withdrawn: I128
+        StringM(Cumulative amount the recipient has already withdrawn, in the token's\nsmallest unit (stroops for the native asset).\n\nThe currently withdrawable balance is `vested_amount - withdrawn`,\nwhere `vested_amount` is computed from the stream schedule and the\ncurrent ledger time. This field only grows; it is never reduced.)
+
+ • Union: StreamStatus
+     Docs: The lifecycle state of a stream, derived from its fields and the current\nledger time. Returned by view calls so clients do not have to recompute\nthe same logic.
+     Cases:
+      • VoidV0(
+            ScSpecUdtUnionCaseVoidV0 {
+                doc: StringM(The current ledger time is before `start_time`; nothing has vested\nyet.),
+                name: StringM(Pending),
+            },
+        )
+      • VoidV0(
+            ScSpecUdtUnionCaseVoidV0 {
+                doc: StringM(The current ledger time is at or after `start_time` and before\n`end_time`; tokens are actively vesting.),
+                name: StringM(Streaming),
+            },
+        )
+      • VoidV0(
+            ScSpecUdtUnionCaseVoidV0 {
+                doc: StringM(The current ledger time is at or after `end_time`; the stream is\nfully vested.),
+                name: StringM(Completed),
+            },
+        )
+      • VoidV0(
+            ScSpecUdtUnionCaseVoidV0 {
+                doc: StringM(The sender cancelled the stream. Cancellation can only happen while\na stream is `Pending` or `Streaming` (a `Completed` stream can no\nlonger be cancelled), but once cancelled the stream reports\n`Cancelled` permanently, overriding what the time-based state would\notherwise be.),
+                name: StringM(Cancelled),
+            },
+        )
+
+ • Union: DataKey
+     Docs: Keys for entries the contract keeps in storage.
+     Cases:
+      • VoidV0(
+            ScSpecUdtUnionCaseVoidV0 {
+                doc: StringM(Monotonic counter holding the id to assign to the next stream.\n\nStored in **instance** storage. It is initialised to `0` on the first\n`create_stream` call and incremented by one each time a new stream is\nopened. Ids are never reused: once a value has been assigned it stays\nconsumed even if the corresponding stream is cancelled or fully vested.\n\nBecause instance storage is not bumped by read-only calls, this entry\nis extended explicitly by [`extend_instance_ttl`] inside `create_stream`\nto keep it alive for as long as the streams it numbers.),
+                name: StringM(StreamCount),
+            },
+        )
+      • TupleV0(
+            ScSpecUdtUnionCaseTupleV0 {
+                doc: StringM(A single stream record, keyed by its numeric id.\n\nStored in **persistent** storage. Each entry holds the full [`Stream`]\nstruct \xe2\x80\x94 participants, token, schedule, withdrawn amount, and cancelled\nflag \xe2\x80\x94 for one stream. The entry is extended to [`ENTRY_TTL`] ledgers\nwhenever it is read or written, so any view or mutating call on a stream\nresets its countdown. A stream that is never touched for longer than\n[`ENTRY_TTL`] ledgers will be archived by the network and must be\nrestored off-contract before it can be used again.),
+                name: StringM(Stream),
+                type_: VecM(
+                    [
+                        U64,
+                    ],
+                ),
+            },
+        )
+
+ • Function: cancel
+     Docs: Cancel a stream and refund the unvested remainder to the sender.\n\nOnly the sender may call this. Whatever has vested up to the current\nledger time stays claimable by the recipient through [`Self::withdraw`];\nthe rest is returned to the sender. Once cancelled, no further tokens\nvest. Returns the amount refunded to the sender.\n\n# Examples\n\n```ignore\nlet refund_amount = client.cancel(&stream_id);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: I128,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: locked
+     Docs: Amount not yet vested: the portion still locked in the contract that the\nrecipient cannot withdraw yet.\n\nLocked behavior across stream lifecycle:\n- Before `start_time` or `cliff_time`: returns `total_amount` (entire amount locked).\n- Between `start_time` and `end_time`: decreases linearly as tokens vest (`total_amount - vested`).\n- At or after `end_time`: returns `0` (0% locked).\n- A cancelled stream returns `0` because cancellation freezes `total_amount` at `vested`.\n\nRejections and Error Behavior:\n- Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage\n(e.g. an unknown id or an id from a creation call rejected for invalid participants).\n- `locked` is a read-only view function: it does not alter state or move tokens.\n\n# Examples\n\n```ignore\nlet remaining_locked = client.locked(&stream_id);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: I128,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: status
+     Docs: Lifecycle status of a stream at the current ledger time.\n\nReturns the derived [`StreamStatus`] for a valid stream:\n- [`StreamStatus::Cancelled`]: if the stream has been cancelled (takes precedence).\n- [`StreamStatus::Pending`]: if current ledger time `now < start_time`.\n- [`StreamStatus::Streaming`]: if `start_time <= now < end_time`.\n- [`StreamStatus::Completed`]: if `now >= end_time`.\n\nRejections and Error Behavior:\n- Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage\n(e.g. an unknown id, or an id from a creation attempt rejected for invalid\nparticipants like the contract's own address).\n- `status` is a read-only view function: it does not alter contract state or move tokens.\n\n# Examples\n\n```ignore\nlet current_status = client.status(&stream_id);\nassert_eq!(current_status, StreamStatus::Streaming);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamStatus),
+                         },
+                     ),
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: vested
+     Docs: Total amount vested so far, including anything already withdrawn.\n\n# Examples\n\n```ignore\nlet total_vested = client.vested(&stream_id);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: I128,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: progress
+     Docs: Vesting progress in basis points, from 0 (nothing vested) to 10000\n(100% vested). Useful for rendering a progress indicator without\nfetching the full stream.\n\nProgress calculations:\n- Returns `0` before `start_time` or `cliff_time`.\n- Scales linearly between `0` and `10000` from `start_time` to `end_time`.\n- Returns `10000` at or after `end_time`, or if `total_amount == 0`.\n- A stream with nothing left to vest, including a cancelled one, reports `10000`.\n\nRejections and Error Behavior:\n- Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage\n(e.g. an unknown id or an id from a creation call rejected due to invalid participants).\n- `progress` is a read-only view function: it does not alter state or move tokens.\n\n# Examples\n\n```ignore\nlet bps = client.progress(&stream_id); // e.g. 5000 for 50%\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: U32,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: withdraw
+     Docs: Withdraw everything that has vested but not yet been taken.\n\nOnly the recipient may call this. The amount sent is whatever has\nvested up to the current ledger time minus what was withdrawn before.\nReturns the amount transferred.\n\n# Examples\n\n```ignore\nlet amount_withdrawn = client.withdraw(&stream_id);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: I128,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: get_stream
+     Docs: Fetch a stream by id.\n\n# Examples\n\n```ignore\nlet stream = client.get_stream(&stream_id);\nassert_eq!(stream.total_amount, 1_000_000_000);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(Stream),
+                         },
+                     ),
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: stream_count
+     Docs: Number of streams created so far. Ids run from zero up to this value\nminus one.\n\n# Examples\n\n```ignore\nlet count = client.stream_count();\n```
+     Inputs: VecM(
+         [],
+     )
+     Output: VecM(
+         [
+             U64,
+         ],
+     )
+
+ • Function: withdrawable
+     Docs: Amount the recipient can withdraw right now.\n\n# Examples\n\n```ignore\nlet available = client.withdrawable(&stream_id);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: I128,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: create_stream
+     Docs: Open a new stream from `sender` to `recipient`.\n\nThe full `total_amount` is pulled from the sender into the contract at\ncreation, so the recipient is guaranteed the funds exist for the life\nof the stream. Vesting runs linearly from `start_time` to `end_time`;\npass `cliff_time == start_time` for a stream with no cliff.\n\nReturns the id assigned to the new stream.\n\n# Validation order\n\nArguments are checked in a fixed order, and **all of it happens before\nany tokens move or any storage is written**. A call that is rejected\nleaves no trace: no transfer, no stream record, no id consumed. When an\nargument list violates more than one rule, the first matching rule below\ndetermines the error, so the result is deterministic rather than an\nartefact of how the checks happen to be ordered in the body:\n\n1. **Authorization** \xe2\x80\x94 `sender` must authorize the call.\n2. **Participants** \xe2\x80\x94 [`StreamError::InvalidParticipant`] if any of\n`sender`, `recipient`, or `token` is this contract's own address.\n3. **Amount** \xe2\x80\x94 [`StreamErr
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(sender),
+                 type_: Address,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(recipient),
+                 type_: Address,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(token),
+                 type_: Address,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(total_amount),
+                 type_: I128,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(start_time),
+                 type_: U64,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(end_time),
+                 type_: U64,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(cliff_time),
+                 type_: U64,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: U64,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+ • Function: withdraw_amount
+     Docs: Withdraw a specific amount, up to what has vested.\n\nOnly the recipient may call this. It behaves like [`Self::withdraw`] but\nlets the caller take less than the full available balance, which is\nuseful for drawing a fixed sum or leaving a buffer in the stream. Fails\nif the requested amount exceeds the currently withdrawable balance.\nReturns the amount transferred.\n\n# Examples\n\n```ignore\nlet amount_withdrawn = client.withdraw_amount(&stream_id, &250_000_000);\n```
+     Inputs: VecM(
+         [
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(id),
+                 type_: U64,
+             },
+             ScSpecFunctionInputV0 {
+                 doc: StringM(),
+                 name: StringM(amount),
+                 type_: I128,
+             },
+         ],
+     )
+     Output: VecM(
+         [
+             Result(
+                 ScSpecTypeResult {
+                     ok_type: I128,
+                     error_type: Udt(
+                         ScSpecTypeUdt {
+                             name: StringM(StreamError),
+                         },
+                     ),
+                 },
+             ),
+         ],
+     )
+
+

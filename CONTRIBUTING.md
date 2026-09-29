@@ -41,12 +41,19 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo audit --deny warnings
+./scripts/diff-interface.sh
 ```
 
 > **Tip:** You can use the project's cargo aliases (defined in `.cargo/config.toml`) for shorter commands: `cargo fmt-check`, `cargo lint`, and `cargo test`. These run the exact same checks as the `Makefile` targets.
 
 CI runs the same checks on every push and pull request. The audit command uses the
 allowlist in `.cargo/audit.toml`.
+
+If you intentionally changed the contract interface, update the snapshot before opening your PR:
+```bash
+make wasm
+stellar contract inspect --wasm target/wasm32v1-none/release/tricklepay_stream.wasm > docs/interface.txt
+```
 
 ## Testing
 
