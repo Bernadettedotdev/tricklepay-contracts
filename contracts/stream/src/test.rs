@@ -3481,6 +3481,45 @@ fn test_view_functions_do_not_modify_stored_state() {
     assert_eq!(after.cancelled, before.cancelled);
 }
 
+/// Issue #313 — Every read-only entry point must stay silent on the event
+/// stream. An indexer must never record activity that did not really happen.
+#[test]
+fn test_view_functions_publish_no_events() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &400,
+    );
+
+    let _ = t.contract.get_stream(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.withdrawable(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.vested(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.locked(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.progress(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.status(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.stream_count();
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+}
+
 /// Issue #254 — Test that withdrawing leaves the schedule untouched.
 ///
 /// A withdrawal updates only the `withdrawn` counter. The schedule fields
