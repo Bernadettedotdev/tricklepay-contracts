@@ -1375,6 +1375,19 @@ fn create_stream_rejects_invalid_parameters() {
     // None of the rejected calls created state or moved funds.
     assert_eq!(t.contract.stream_count(), 0);
     assert_eq!(t.token.balance(&t.sender), 1_000);
+
+    // The next successful creation receives the still-unused first id.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(id, 0);
+    assert_eq!(t.contract.stream_count(), 1);
 }
 
 #[test]
