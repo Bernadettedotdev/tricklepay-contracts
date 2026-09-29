@@ -4097,3 +4097,17 @@ fn test_cliff_equal_to_start_behaves_as_no_cliff() {
     assert_eq!(t.contract.withdrawable(&id_cliff), 1_000);
     assert_eq!(t.contract.withdrawable(&id_uncliffed), 1_000);
 }
+
+#[test]
+fn status_ends_pending_at_start_time() {
+    let t = StreamTest::setup(1_000);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+}
