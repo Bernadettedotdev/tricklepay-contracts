@@ -4101,6 +4101,7 @@ fn test_cliff_equal_to_start_behaves_as_no_cliff() {
 #[test]
 fn status_ends_pending_at_start_time() {
     let t = StreamTest::setup(1_000);
+    t.set_time(50);
     let id = t.contract.create_stream(
         &t.sender,
         &t.recipient,
@@ -4110,4 +4111,6 @@ fn status_ends_pending_at_start_time() {
         &1_100,
         &100,
     );
+
+    assert_eq!(t.contract.status(&id), StreamStatus::Pending);
 }
