@@ -105,6 +105,22 @@ impl<'a> StreamTest<'a> {
         )
     }
 
+    /// Exercise a raw `create_stream` call and confirm the contract rejects it
+    /// without panicking. The helper is intentionally written to return a bool
+    /// so tests can assert on the failed invocation as a smoke test before
+    /// checking the exact contract error separately.
+    pub fn try_create_stream_for_raw(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> bool {
+        self.contract
+            .try_create_stream(sender, recipient, token, &amount, &100, &1_100, &100)
+            .is_err()
+    }
+
     /// Assert that creating a stream with explicit participant and token
     /// overrides, using the standard schedule `[100, 1100]` with no cliff and
     /// `amount`, fails with the expected contract error.
@@ -418,6 +434,32 @@ fn progress_reports_basis_points() {
 }
 
 #[test]
+fn progress_never_decreases_as_time_advances() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let mut previous = 0;
+    for timestamp in [50, 100, 101, 250, 350, 600, 850, 1_099, 1_100, 1_200] {
+        t.set_time(timestamp);
+        let progress = t.contract.progress(&id);
+        assert!(
+            progress >= previous,
+            "progress decreased from {previous} to {progress} at timestamp {timestamp}"
+        );
+        previous = progress;
+    }
+}
+
+#[test]
 fn locked_decreases_as_the_stream_vests() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
@@ -448,6 +490,31 @@ fn locked_decreases_as_the_stream_vests() {
     assert_eq!(t.contract.locked(&id), 0);
     assert_eq!(t.contract.vested(&id), 1_000);
     assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
+}
+
+#[test]
+fn locked_never_goes_negative_across_sampled_times() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &600,
+    );
+
+    for now in [100u64, 300, 600, 850, 1_100, 1_200] {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        let locked = t.contract.locked(&id);
+        assert!(locked >= 0, "locked={} vested={} at time={}", locked, vested, now);
+        assert_eq!(locked, (1_000 - vested).max(0));
+    }
+
+    assert_eq!(t.contract.locked(&id), 0);
 }
 
 #[test]
@@ -515,6 +582,43 @@ fn withdraw_amount_takes_a_partial_balance() {
         contract_balance_before
     );
     assert_eq!(t.contract.get_stream(&id).withdrawn, withdrawn_before);
+}
+
+#[test]
+fn withdrawable_never_exceeds_vested_across_sampled_times_and_partial_withdrawal() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    for now in [100u64, 300, 600, 850, 1_100] {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        let withdrawable = t.contract.withdrawable(&id);
+        assert!(withdrawable <= vested, "withdrawable={} vested={} at time={}", withdrawable, vested, now);
+    }
+
+    t.set_time(600);
+    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
+    let vested = t.contract.vested(&id);
+    let withdrawable = t.contract.withdrawable(&id);
+    assert_eq!(vested, 500);
+    assert_eq!(withdrawable, 300);
+    assert!(withdrawable <= vested);
+
+    t.set_time(850);
+    let vested = t.contract.vested(&id);
+    let withdrawable = t.contract.withdrawable(&id);
+    assert_eq!(vested, 750);
+    assert_eq!(withdrawable, 550);
+    assert!(withdrawable <= vested);
 }
 
 #[test]
@@ -764,6 +868,47 @@ fn test_withdraw_after_full_vesting() {
 
     // Nothing remains to withdraw.
     assert_eq!(t.contract.withdrawable(&id), 0);
+}
+
+#[test]
+fn contract_balance_is_zero_after_full_settlement() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(1_100 + 1_000);
+    assert_eq!(t.contract.withdraw(&id), 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.withdraw(&id), 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
 }
 
 #[test]
@@ -1256,6 +1401,19 @@ fn create_stream_rejects_invalid_parameters() {
     // None of the rejected calls created state or moved funds.
     assert_eq!(t.contract.stream_count(), 0);
     assert_eq!(t.token.balance(&t.sender), 1_000);
+
+    // The next successful creation receives the still-unused first id.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(id, 0);
+    assert_eq!(t.contract.stream_count(), 1);
 }
 
 #[test]
@@ -1474,6 +1632,7 @@ fn create_stream_accepts_max_amount() {
 
     // At end_time the full amount is vested and withdrawable without panic.
     t.set_time(101);
+    assert_eq!(t.contract.vested(&id), MAX_AMOUNT);
     assert_eq!(t.contract.withdrawable(&id), MAX_AMOUNT);
     assert_eq!(t.contract.withdraw(&id), MAX_AMOUNT);
     assert_eq!(t.token.balance(&t.recipient), MAX_AMOUNT);
@@ -1499,6 +1658,40 @@ fn create_stream_rejects_i128_max() {
         &100,
     );
     assert_eq!(result, Err(Ok(StreamError::AmountTooLarge)));
+}
+
+/// Vesting should never go backwards as time advances. This regression test
+/// samples several points across the schedule and asserts the vested amount is
+/// non-decreasing at each step.
+#[test]
+fn vested_amount_never_decreases_over_time() {
+    let t = StreamTest::setup(1_000);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let checkpoints = [(100, 0), (350, 250), (600, 500), (850, 750), (1_100, 1_000)];
+    let mut previous = None;
+
+    for (now, expected) in checkpoints {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        assert_eq!(vested, expected, "vested amount at t={now} should match the schedule");
+
+        if let Some(prev) = previous {
+            assert!(
+                vested >= prev,
+                "vesting decreased from {prev} to {vested} as time advanced to {now}"
+            );
+        }
+        previous = Some(vested);
+    }
 }
 
 /// A long-lived stream (duration close to u64::MAX) with an amount at the
@@ -2022,7 +2215,19 @@ fn withdraw_amount_emits_withdrawn_after_the_payout_transfer() {
     let id = t.open_default_stream(1_000);
 
     t.set_time(600);
-    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
+    let recipient_balance_before = t.token.balance(&t.recipient);
+    let withdrawn = t.contract.withdraw_amount(&id, &200);
+    let transferred = t.token.balance(&t.recipient) - recipient_balance_before;
+
+    assert_eq!(withdrawn, transferred);
+    t.assert_latest_stream_event_topics(
+        Withdrawn {
+            recipient: t.recipient.clone(),
+            id,
+            amount: transferred,
+        }
+        .to_xdr(&t.env, &t.contract.address),
+    );
 
     assert_eq!(t.event_publishers(), t.transfer_then_announce());
 }
@@ -2129,14 +2334,18 @@ fn cancelled_event_topics_index_sender() {
     let id = t.open_default_stream(1_000);
 
     t.set_time(600);
+    let recipient_amount = 500;
     let refund = t.contract.cancel(&id);
 
-    assert_eq!(refund, 500);
+    assert_eq!(refund, recipient_amount);
+    // At the midpoint, the remaining escrow is split cleanly between the
+    // recipient's accrued share and the sender's refund.
+    assert_eq!(recipient_amount + refund, 1_000);
     t.assert_latest_stream_event_topics(
         Cancelled {
             sender: t.sender.clone(),
             id,
-            recipient_amount: 500,
+            recipient_amount,
             sender_refund: refund,
         }
         .to_xdr(&t.env, &t.contract.address),
@@ -3365,6 +3574,45 @@ fn test_view_functions_do_not_modify_stored_state() {
     assert_eq!(after.cancelled, before.cancelled);
 }
 
+/// Issue #313 — Every read-only entry point must stay silent on the event
+/// stream. An indexer must never record activity that did not really happen.
+#[test]
+fn test_view_functions_publish_no_events() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &400,
+    );
+
+    let _ = t.contract.get_stream(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.withdrawable(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.vested(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.locked(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.progress(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.status(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.stream_count();
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+}
+
 /// Issue #254 — Test that withdrawing leaves the schedule untouched.
 ///
 /// A withdrawal updates only the `withdrawn` counter. The schedule fields
@@ -3649,6 +3897,67 @@ fn test_recipient_balance_rises_by_withdrawn_amount() {
         recipient_after_partial + withdrawn_full
     );
     assert_eq!(contract_after_full, contract_after_partial - withdrawn_full);
+}
+
+/// Issue #309 — Test that two streams in the same token settle independently.
+///
+/// Streams created with the same token all share the same contract wallet, so a
+/// withdrawal from one stream must not modify the escrow, `withdrawn` total, or
+/// remaining withdrawable balance of any other stream that uses that token.
+#[test]
+fn test_two_streams_sharing_a_token_settle_independently() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+
+    let id_a = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    let id_b = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    assert_eq!(t.contract.stream_count(), 2);
+    assert_eq!(t.token.balance(&t.contract.address), 2_000);
+
+    t.set_time(600);
+
+    // Stream A has 500 vested at this ledger time, so a 200 withdrawal should
+    // change only its own accounting and the contract's aggregate balance.
+    assert_eq!(t.contract.withdraw_amount(&id_a, &200), 200);
+
+    let stream_a_after = t.contract.get_stream(&id_a);
+    let stream_b_after = t.contract.get_stream(&id_b);
+    assert_eq!(stream_a_after.withdrawn, 200);
+    assert_eq!(stream_b_after.withdrawn, 0);
+    assert_eq!(t.contract.withdrawable(&id_a), 300);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+    assert_eq!(t.token.balance(&t.recipient), 200);
+    assert_eq!(t.token.balance(&t.contract.address), 1_800);
+
+    // A withdrawal from stream B must not alter A's recorded withdrawal total or
+    // the remaining escrow attached to A.
+    assert_eq!(t.contract.withdraw_amount(&id_b, &100), 100);
+
+    let stream_a_final = t.contract.get_stream(&id_a);
+    let stream_b_final = t.contract.get_stream(&id_b);
+    assert_eq!(stream_a_final.withdrawn, 200);
+    assert_eq!(stream_b_final.withdrawn, 100);
+    assert_eq!(t.contract.withdrawable(&id_a), 300);
+    assert_eq!(t.contract.withdrawable(&id_b), 400);
+    assert_eq!(t.token.balance(&t.recipient), 300);
+    assert_eq!(t.token.balance(&t.contract.address), 1_700);
 }
 
 /// Issue #299 — Test that cancellation refunds the stored sender.

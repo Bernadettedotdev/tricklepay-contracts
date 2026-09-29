@@ -12,6 +12,12 @@ This repository holds the `stream` contract and its test suite. The indexer and
 web client that build on it live in separate repositories; see
 [Related repositories](#related-repositories).
 
+Integrator-facing operational policies live in
+[docs/INTEGRATOR_OPERATIONS.md](docs/INTEGRATOR_OPERATIONS.md). That guide
+covers redeployment without upgradeability, interface stability, safe retry
+behavior after uncertain submissions, and the practical duration limits imposed
+by storage TTL.
+
 ## Soroban SDK compatibility
 
 The contract targets Soroban SDK `25.0.0`, pinned in the workspace

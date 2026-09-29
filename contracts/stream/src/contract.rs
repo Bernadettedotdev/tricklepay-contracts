@@ -345,13 +345,13 @@ impl StreamContract {
             );
         }
 
-        events::Cancelled {
-            sender: stream.sender.clone(),
+        events::publish_cancelled(
+            &env,
+            &stream.sender,
             id,
-            recipient_amount: settlement.recipient_remaining,
-            sender_refund: settlement.refund,
-        }
-        .publish(&env);
+            settlement.recipient_remaining,
+            settlement.refund,
+        );
 
         Ok(settlement.refund)
     }
@@ -441,7 +441,7 @@ impl StreamContract {
             stream.cliff_time,
             env.ledger().timestamp(),
         );
-        Ok(stream.total_amount - vested)
+        Ok((stream.total_amount - vested).max(0))
     }
 
     /// Vesting progress in basis points, from 0 (nothing vested) to 10000
