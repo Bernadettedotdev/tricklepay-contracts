@@ -4145,4 +4145,9 @@ fn cancel_fully_drawn_stream_refunds_nothing() {
     
     // Cancelling should refuse (or return 0). In this case it refuses because it's already completed.
     assert_eq!(res, Err(Ok(StreamError::StreamAlreadyCompleted)));
+
+    // No tokens move back to the sender
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
 }
