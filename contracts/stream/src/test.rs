@@ -434,6 +434,32 @@ fn progress_reports_basis_points() {
 }
 
 #[test]
+fn progress_never_decreases_as_time_advances() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let mut previous = 0;
+    for timestamp in [50, 100, 101, 250, 350, 600, 850, 1_099, 1_100, 1_200] {
+        t.set_time(timestamp);
+        let progress = t.contract.progress(&id);
+        assert!(
+            progress >= previous,
+            "progress decreased from {previous} to {progress} at timestamp {timestamp}"
+        );
+        previous = progress;
+    }
+}
+
+#[test]
 fn locked_decreases_as_the_stream_vests() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
