@@ -4134,4 +4134,9 @@ fn cancel_fully_drawn_stream_refunds_nothing() {
         &1_100,
         &100,
     );
+
+    // Fully draw the stream
+    t.set_time(1_100);
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 1_000);
 }
