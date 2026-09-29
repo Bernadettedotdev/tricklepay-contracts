@@ -4123,3 +4123,21 @@ fn counter_is_unchanged_by_withdrawals() {
     t.contract.withdraw(&id);
     assert_eq!(t.contract.stream_count(), initial_count);
 }
+
+#[test]
+fn exact_vesting_at_the_midpoint() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    assert_eq!(t.contract.vested(&id), 500);
+}
