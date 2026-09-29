@@ -4141,3 +4141,23 @@ fn exact_vesting_at_the_midpoint() {
     t.set_time(600);
     assert_eq!(t.contract.vested(&id), 500);
 }
+
+#[test]
+fn vesting_never_exceeds_the_total() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    for now in [1_099, 1_100, 1_101, 2_000, 10_000, 100_000] {
+        t.set_time(now);
+        assert!(t.contract.vested(&id) <= 1_000);
+    }
+}
