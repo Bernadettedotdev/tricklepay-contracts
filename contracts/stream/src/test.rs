@@ -1501,6 +1501,40 @@ fn create_stream_rejects_i128_max() {
     assert_eq!(result, Err(Ok(StreamError::AmountTooLarge)));
 }
 
+/// Vesting should never go backwards as time advances. This regression test
+/// samples several points across the schedule and asserts the vested amount is
+/// non-decreasing at each step.
+#[test]
+fn vested_amount_never_decreases_over_time() {
+    let t = StreamTest::setup(1_000);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let checkpoints = [(100, 0), (350, 250), (600, 500), (850, 750), (1_100, 1_000)];
+    let mut previous = None;
+
+    for (now, expected) in checkpoints {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        assert_eq!(vested, expected, "vested amount at t={now} should match the schedule");
+
+        if let Some(prev) = previous {
+            assert!(
+                vested >= prev,
+                "vesting decreased from {prev} to {vested} as time advanced to {now}"
+            );
+        }
+        previous = Some(vested);
+    }
+}
+
 /// A long-lived stream (duration close to u64::MAX) with an amount at the
 /// cap must compute vested amounts without overflow at any point in time.
 /// We sample a handful of checkpoints to exercise the multiplication.
