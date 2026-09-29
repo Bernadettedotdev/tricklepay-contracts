@@ -4120,3 +4120,18 @@ fn status_ends_pending_at_start_time() {
     t.set_time(101);
     assert_ne!(t.contract.status(&id), StreamStatus::Pending);
 }
+
+#[test]
+fn cancel_fully_drawn_stream_refunds_nothing() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+}
