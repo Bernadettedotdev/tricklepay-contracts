@@ -441,7 +441,7 @@ impl StreamContract {
             stream.cliff_time,
             env.ledger().timestamp(),
         );
-        Ok(stream.total_amount - vested)
+        Ok((stream.total_amount - vested).max(0))
     }
 
     /// Vesting progress in basis points, from 0 (nothing vested) to 10000
