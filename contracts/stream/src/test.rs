@@ -4113,4 +4113,7 @@ fn status_ends_pending_at_start_time() {
     );
 
     assert_eq!(t.contract.status(&id), StreamStatus::Pending);
+
+    t.set_time(100);
+    assert_ne!(t.contract.status(&id), StreamStatus::Pending);
 }
