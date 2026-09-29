@@ -845,6 +845,47 @@ fn test_withdraw_after_full_vesting() {
 }
 
 #[test]
+fn contract_balance_is_zero_after_full_settlement() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(1_100 + 1_000);
+    assert_eq!(t.contract.withdraw(&id), 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.withdraw(&id), 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+#[test]
 fn cancel_refunds_unvested_and_preserves_vested() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
@@ -3804,6 +3845,67 @@ fn test_recipient_balance_rises_by_withdrawn_amount() {
         recipient_after_partial + withdrawn_full
     );
     assert_eq!(contract_after_full, contract_after_partial - withdrawn_full);
+}
+
+/// Issue #309 — Test that two streams in the same token settle independently.
+///
+/// Streams created with the same token all share the same contract wallet, so a
+/// withdrawal from one stream must not modify the escrow, `withdrawn` total, or
+/// remaining withdrawable balance of any other stream that uses that token.
+#[test]
+fn test_two_streams_sharing_a_token_settle_independently() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+
+    let id_a = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    let id_b = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    assert_eq!(t.contract.stream_count(), 2);
+    assert_eq!(t.token.balance(&t.contract.address), 2_000);
+
+    t.set_time(600);
+
+    // Stream A has 500 vested at this ledger time, so a 200 withdrawal should
+    // change only its own accounting and the contract's aggregate balance.
+    assert_eq!(t.contract.withdraw_amount(&id_a, &200), 200);
+
+    let stream_a_after = t.contract.get_stream(&id_a);
+    let stream_b_after = t.contract.get_stream(&id_b);
+    assert_eq!(stream_a_after.withdrawn, 200);
+    assert_eq!(stream_b_after.withdrawn, 0);
+    assert_eq!(t.contract.withdrawable(&id_a), 300);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+    assert_eq!(t.token.balance(&t.recipient), 200);
+    assert_eq!(t.token.balance(&t.contract.address), 1_800);
+
+    // A withdrawal from stream B must not alter A's recorded withdrawal total or
+    // the remaining escrow attached to A.
+    assert_eq!(t.contract.withdraw_amount(&id_b, &100), 100);
+
+    let stream_a_final = t.contract.get_stream(&id_a);
+    let stream_b_final = t.contract.get_stream(&id_b);
+    assert_eq!(stream_a_final.withdrawn, 200);
+    assert_eq!(stream_b_final.withdrawn, 100);
+    assert_eq!(t.contract.withdrawable(&id_a), 300);
+    assert_eq!(t.contract.withdrawable(&id_b), 400);
+    assert_eq!(t.token.balance(&t.recipient), 300);
+    assert_eq!(t.token.balance(&t.contract.address), 1_700);
 }
 
 /// Issue #299 — Test that cancellation refunds the stored sender.
