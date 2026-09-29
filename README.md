@@ -20,7 +20,7 @@ by storage TTL.
 
 ## Soroban SDK compatibility
 
-The contract targets Soroban SDK `25.0.0`, pinned in the workspace
+The contract targets Soroban SDK `25.3.2`, pinned to an exact version (`=25.3.2`) in the workspace
 `Cargo.toml`. The same version is used for the contract build and its test
 host.
 
