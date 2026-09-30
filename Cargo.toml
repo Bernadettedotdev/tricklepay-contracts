@@ -9,9 +9,9 @@ license = "MIT"
 repository = "https://github.com/tricklepay/tricklepay-contracts"
 
 [workspace.dependencies]
-# Pin soroban-sdk to a version matching the tests' expected client API.
+# Pin soroban-sdk to an exact version matching the tests' expected client API.
 # If this needs adjustment, I'll iterate to the exact compatible version.
-soroban-sdk = "25.0.0"
+soroban-sdk = "=25.3.2"
 
 [profile.release]
 opt-level = "z"

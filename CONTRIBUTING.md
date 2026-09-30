@@ -41,12 +41,19 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo audit --deny warnings
+./scripts/diff-interface.sh
 ```
 
 > **Tip:** You can use the project's cargo aliases (defined in `.cargo/config.toml`) for shorter commands: `cargo fmt-check`, `cargo lint`, and `cargo test`. These run the exact same checks as the `Makefile` targets.
 
 CI runs the same checks on every push and pull request. The audit command uses the
 allowlist in `.cargo/audit.toml`.
+
+If you intentionally changed the contract interface, update the snapshot before opening your PR:
+```bash
+make wasm
+stellar contract inspect --wasm target/wasm32v1-none/release/tricklepay_stream.wasm > docs/interface.txt
+```
 
 ## Testing
 
@@ -158,8 +165,16 @@ change. Reference the issue in the commit body or the pull request description
 3. If your change modifies contract ABI, user-facing behavior, or fixes a bug, update `CHANGELOG.md` per the guidelines below.
 4. Push the branch to your fork and open a pull request against `main`.
 5. Describe the change, the motivation, and how you verified it, and link the
-   issue you are addressing (for example `Closes #123`).
+   issue you are addressing (for example `Closes #123`). If your pull request modifies contract logic, ensure it meets the [Contract change checklist](#contract-change-checklist).
 6. Be responsive to review feedback; follow-up commits during review are fine.
+
+## Contract change checklist
+
+When your pull request changes contract logic or interface, please verify:
+
+- [ ] **Tests:** New or changed behavior is covered by tests that control the ledger clock explicitly.
+- [ ] **Changelog:** The change is documented in `CHANGELOG.md` following the guidelines below.
+- [ ] **Interface:** If the contract interface changed, the snapshot in `docs/interface.txt` has been updated and `make check` passes.
 
 ## Updating the changelog
 
