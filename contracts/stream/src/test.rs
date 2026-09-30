@@ -4097,3 +4097,57 @@ fn test_cliff_equal_to_start_behaves_as_no_cliff() {
     assert_eq!(t.contract.withdrawable(&id_cliff), 1_000);
     assert_eq!(t.contract.withdrawable(&id_uncliffed), 1_000);
 }
+
+#[test]
+fn status_ends_pending_at_start_time() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(50);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    assert_eq!(t.contract.status(&id), StreamStatus::Pending);
+
+    t.set_time(100);
+    assert_ne!(t.contract.status(&id), StreamStatus::Pending);
+
+    t.set_time(101);
+    assert_ne!(t.contract.status(&id), StreamStatus::Pending);
+}
+
+#[test]
+fn cancel_fully_drawn_stream_refunds_nothing() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Fully draw the stream
+    t.set_time(1_100);
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 1_000);
+
+    // The stream is fully drawn. Attempt to cancel.
+    let res = t.contract.try_cancel(&id);
+    
+    // Cancelling should refuse (or return 0). In this case it refuses because it's already completed.
+    assert_eq!(res, Err(Ok(StreamError::StreamAlreadyCompleted)));
+
+    // No tokens move back to the sender
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
+}
