@@ -54,7 +54,7 @@ A stream is defined by a total amount and a window of time:
 - **Cliff** (optional) is a point before which nothing can be withdrawn. When
   the cliff is reached, everything accrued since the start unlocks at once and
   vesting continues linearly from there. `cliff_time` must fall inside
-  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`.
+  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`
 
   **A stream has no cliff when `cliff_time == start_time`.** There is no
   separate flag or null value to pass — the cliff is always a timestamp, and
