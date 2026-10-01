@@ -85,7 +85,6 @@ impl Stream {
     }
 }
 
-
 /// The lifecycle state of a stream, derived from its fields and the current
 /// ledger time. Returned by view calls so clients do not have to recompute
 /// the same logic.

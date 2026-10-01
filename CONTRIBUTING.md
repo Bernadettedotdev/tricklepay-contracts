@@ -66,7 +66,7 @@ moves time forward by assigning it. Time in a test is therefore a value you
 choose, not a value that drifts.
 
 The contracts have two clocks, and `StreamTest` in
-[`contracts/stream/src/test.rs`](contracts/stream/src/test.rs) exposes a helper
+[`contracts/stream/src/tests/helpers.rs`](contracts/stream/src/tests/helpers.rs) exposes a helper
 for each:
 
 | Helper | Underlying call | Use it for |
@@ -126,8 +126,8 @@ unnoticed.
 
 ### Writing a test for a new behaviour
 
-All tests live in [`contracts/stream/src/test.rs`](contracts/stream/src/test.rs)
- — the suite is one file, so the fastest way to learn its conventions is to read
+All tests live in [`contracts/stream/src/tests/`](contracts/stream/src/tests/)
+ — the suite is split into one module per area (see `tests/mod.rs`), so the fastest way to learn its conventions is to read
 the tests around the behaviour you are touching. `StreamTest::setup` builds the
 whole environment for you: a registered stream contract, a Stellar asset
 token, a sender funded with the balance you pass, and `mock_all_auths()` so
@@ -220,8 +220,8 @@ Conventions the suite expects:
 - **Prefer a fixture helper before reaching for the raw ledger API.**
   `StreamTest` also exposes `set_sequence` for ledger lifetimes, and storage
   introspection such as `stream_ttl`, `persistent_has`, and `set_stream_count`
-  for boundary cases no entry point can reach; read the fixture at the top of
-  `test.rs` before duplicating one of them.
+  for boundary cases no entry point can reach; read the fixture in
+  `tests/helpers.rs` before duplicating one of them.
 
 For events, use the fixture helpers instead of decoding XDR by hand:
 `event_publishers()` returns who published the latest invocation's events in
