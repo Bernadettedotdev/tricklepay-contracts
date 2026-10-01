@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use soroban_sdk::vec;
+
 use crate::{StreamError, StreamStatus};
 
 use super::helpers::StreamTest;
@@ -18,11 +20,44 @@ fn progress_reports_basis_points() {
         &100,
     );
 
+    // Nothing vested at the start.
     assert_eq!(t.contract.progress(&id), 0);
+    // Halfway is 50 percent, in basis points.
     t.set_time(600);
     assert_eq!(t.contract.progress(&id), 5_000);
+    // One second before the end, progress must still be below the maximum.
+    t.set_time(1_099);
+    assert_eq!(t.contract.progress(&id), 9_990);
+    assert!(t.contract.progress(&id) < 10_000);
+    // Fully vested at the end.
     t.set_time(1_100);
     assert_eq!(t.contract.progress(&id), 10_000);
+}
+
+#[test]
+fn progress_never_decreases_as_time_advances() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let mut previous = 0;
+    for timestamp in [50, 100, 101, 250, 350, 600, 850, 1_099, 1_100, 1_200] {
+        t.set_time(timestamp);
+        let progress = t.contract.progress(&id);
+        assert!(
+            progress >= previous,
+            "progress decreased from {previous} to {progress} at timestamp {timestamp}"
+        );
+        previous = progress;
+    }
 }
 
 #[test]
@@ -36,13 +71,56 @@ fn locked_decreases_as_the_stream_vests() {
         &1_000,
         &100,
         &1_100,
-        &100,
+        &600,
     );
 
+    // Before the cliff, nothing is vested and the whole amount is locked.
+    t.set_time(300);
     assert_eq!(t.contract.locked(&id), 1_000);
-    t.set_time(600);
-    assert_eq!(t.contract.locked(&id), 500);
-    t.set_time(1_100);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
+
+    // Mid-stream, vested and locked remain complementary.
+    t.set_time(850);
+    assert_eq!(t.contract.locked(&id), 250);
+    assert_eq!(t.contract.vested(&id), 750);
+    assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
+
+    // After the end, all value is vested and none is locked.
+    t.set_time(1_200);
+    assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.vested(&id), 1_000);
+    assert_eq!(t.contract.locked(&id) + t.contract.vested(&id), 1_000);
+}
+
+#[test]
+fn locked_never_goes_negative_across_sampled_times() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &600,
+    );
+
+    for now in [100u64, 300, 600, 850, 1_100, 1_200] {
+        t.set_time(now);
+        let vested = t.contract.vested(&id);
+        let locked = t.contract.locked(&id);
+        assert!(
+            locked >= 0,
+            "locked={} vested={} at time={}",
+            locked,
+            vested,
+            now
+        );
+        assert_eq!(locked, (1_000 - vested).max(0));
+    }
+
     assert_eq!(t.contract.locked(&id), 0);
 }
 
@@ -72,7 +150,10 @@ fn views_are_correct_on_a_cancelled_stream() {
     assert_eq!(t.contract.withdrawable(&id), 500);
 }
 
-/// Views remain correct after the recipient drains a cancelled stream.
+/// Same four view assertions, but run again after the recipient has drained
+/// the remaining vested balance. Once the recipient withdraws, withdrawable
+/// must fall to 0 and the other views must stay stable. This also confirms
+/// the token balances add up and a second withdraw is rejected.
 #[test]
 fn views_remain_correct_after_recipient_drains_cancelled_stream() {
     let t = StreamTest::setup(1_000);
@@ -87,22 +168,34 @@ fn views_remain_correct_after_recipient_drains_cancelled_stream() {
         &100,
     );
 
+    // Cancel at the midpoint and then advance time well past the original end
+    // to confirm the frozen state does not change with the clock.
     t.set_time(600);
     t.contract.cancel(&id);
+    assert_eq!(t.contract.get_stream(&id).total_amount, 500);
     t.set_time(2_000);
 
+    assert_eq!(t.contract.get_stream(&id).total_amount, 500);
+    assert_eq!(t.contract.vested(&id), 500);
+
+    // Recipient drains their share.
     let withdrawn = t.contract.withdraw(&id);
     assert_eq!(withdrawn, 500);
 
+    // Token balances add up to the original total — nothing was lost.
     assert_eq!(t.token.balance(&t.sender), 500);
     assert_eq!(t.token.balance(&t.recipient), 500);
     assert_eq!(t.token.balance(&t.contract.address), 0);
 
+    // Views must remain consistent after the drain.
     assert_eq!(t.contract.locked(&id), 0);
     assert_eq!(t.contract.progress(&id), 10_000);
     assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // withdrawable() must now be 0 — the recipient took everything.
     assert_eq!(t.contract.withdrawable(&id), 0);
 
+    // A second withdraw attempt must be rejected.
     assert_eq!(
         t.contract.try_withdraw(&id),
         Err(Ok(StreamError::NothingToWithdraw))
@@ -138,7 +231,10 @@ fn test_view_functions_do_not_modify_stored_state() {
     let _ = t.contract.stream_count();
 
     let after = t.contract.get_stream(&id);
-    assert_eq!(after, before, "a view call must not modify the stored stream");
+    assert_eq!(
+        after, before,
+        "a view call must not modify the stored stream"
+    );
 
     assert_eq!(after.withdrawn, before.withdrawn);
     assert_eq!(after.total_amount, before.total_amount);
@@ -146,6 +242,45 @@ fn test_view_functions_do_not_modify_stored_state() {
     assert_eq!(after.cliff_time, before.cliff_time);
     assert_eq!(after.end_time, before.end_time);
     assert_eq!(after.cancelled, before.cancelled);
+}
+
+/// Issue #313 — Every read-only entry point must stay silent on the event
+/// stream. An indexer must never record activity that did not really happen.
+#[test]
+fn test_view_functions_publish_no_events() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &400,
+    );
+
+    let _ = t.contract.get_stream(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.withdrawable(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.vested(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.locked(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.progress(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.status(&id);
+    assert_eq!(t.event_publishers(), vec![&t.env]);
+
+    let _ = t.contract.stream_count();
+    assert_eq!(t.event_publishers(), vec![&t.env]);
 }
 
 /// Issue #75 — Third-party view access: read-only functions are public and

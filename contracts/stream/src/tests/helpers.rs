@@ -92,7 +92,7 @@ impl<'a> StreamTest<'a> {
 
     /// Open a stream over `[100, 1100]` with no cliff, the shape most of these
     /// tests use.
-    pub fn open_default_stream(&self, amount: i128) -> u64 {
+    fn open_default_stream(&self, amount: i128) -> u64 {
         self.contract.create_stream(
             &self.sender,
             &self.recipient,
@@ -104,10 +104,10 @@ impl<'a> StreamTest<'a> {
         )
     }
 
-    /// Attempt to create a stream with explicit participant and token
-    /// overrides, using the standard schedule `[100, 1100]` with no cliff and
-    /// `amount`. Returns `true` if the call was rejected, `false` if it
-    /// succeeded.
+    /// Exercise a raw `create_stream` call and confirm the contract rejects it
+    /// without panicking. The helper is intentionally written to return a bool
+    /// so tests can assert on the failed invocation as a smoke test before
+    /// checking the exact contract error separately.
     pub fn try_create_stream_for_raw(
         &self,
         sender: &Address,
@@ -115,18 +115,42 @@ impl<'a> StreamTest<'a> {
         token: &Address,
         amount: i128,
     ) -> bool {
+        self.contract
+            .try_create_stream(sender, recipient, token, &amount, &100, &1_100, &100)
+            .is_err()
+    }
+
+    /// Assert that creating a stream with explicit participant and token
+    /// overrides, using the standard schedule `[100, 1100]` with no cliff and
+    /// `amount`, fails with the expected contract error.
+    pub fn assert_create_stream_error(
+        &self,
+        sender: &Address,
+        recipient: &Address,
+        token: &Address,
+        amount: i128,
+        expected: StreamError,
+    ) {
         let res = self
             .contract
             .try_create_stream(sender, recipient, token, &amount, &100, &1_100, &100);
-        match res {
-            Ok(Ok(_)) => false,
-            Ok(Err(_)) => true,
-            Err(_) => true,
-        }
+        assert_eq!(res, Err(Ok(expected)));
     }
 
     /// The addresses that published the events of the latest invocation, in
     /// publication order.
+    ///
+    /// In soroban-sdk 25 `events().all()` reports only the most recent
+    /// invocation, so running this right after an operation yields exactly the
+    /// events that operation published rather than everything the fixture
+    /// emitted while being built.
+    ///
+    /// Ordering is asserted through the publisher rather than the payload
+    /// because that is exactly what distinguishes "the tokens moved, then the
+    /// contract announced it" from "the contract announced it, then the tokens
+    /// moved": a token transfer is published by the token contract, and the
+    /// stream's own `Created` / `Withdrawn` / `Cancelled` events are published
+    /// by the stream contract.
     pub fn event_publishers(&self) -> Vec<Address> {
         let mut publishers = Vec::new(&self.env);
         for event in self.env.events().all().events() {
@@ -160,9 +184,31 @@ impl<'a> StreamTest<'a> {
         assert_eq!(latest.ext, expected.ext);
         assert_eq!(latest.type_, expected.type_);
         assert_eq!(latest_body.topics, expected_body.topics);
+        assert_eq!(latest_body.data, expected_body.data);
     }
 
-    /// Whether a persistent entry exists under `key`.
+    /// Assert the latest invocation did not publish a stream event with the
+    /// given topic list.
+    pub fn assert_no_stream_event_topics(&self, unexpected: xdr::ContractEvent) {
+        let all_events = self.env.events().all();
+        let xdr::ContractEventBody::V0(unexpected_body) = &unexpected.body;
+
+        for event in all_events.events() {
+            let xdr::ContractEventBody::V0(event_body) = &event.body;
+            assert!(
+                !(event.ext == unexpected.ext
+                    && event.contract_id == unexpected.contract_id
+                    && event.type_ == unexpected.type_
+                    && event_body.topics == unexpected_body.topics),
+                "unexpected stream event topics were published"
+            );
+        }
+    }
+
+    /// Whether a persistent entry exists under `key`, read straight out of the
+    /// contract's storage rather than through an entry point. Entry points
+    /// answer `StreamNotFound` for both "no such key" and "key holds
+    /// something unexpected", so key-level questions have to be asked here.
     pub fn persistent_has(&self, key: &DataKey) -> bool {
         let address = self.contract.address.clone();
         self.env

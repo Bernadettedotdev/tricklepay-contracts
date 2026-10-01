@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+use soroban_sdk::Vec;
+
 use crate::{StreamError, StreamStatus};
 
 use super::helpers::StreamTest;
@@ -23,6 +25,7 @@ fn cancel_refunds_unvested_and_preserves_vested() {
     let refund = t.contract.cancel(&id);
     assert_eq!(refund, 500);
 
+    // The sender gets the unvested half back immediately.
     assert_eq!(t.token.balance(&t.sender), 500);
     assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
 
@@ -32,15 +35,24 @@ fn cancel_refunds_unvested_and_preserves_vested() {
     assert_eq!(t.contract.withdraw(&id), 500);
     assert_eq!(t.token.balance(&t.recipient), 500);
 
+    // The split adds up to the original total and the contract is drained.
     assert_eq!(t.token.balance(&t.contract.address), 0);
 
+    // A stream cannot be cancelled twice.
     assert_eq!(
         t.contract.try_cancel(&id),
         Err(Ok(StreamError::AlreadyCancelled))
     );
+    assert_eq!(t.event_publishers(), Vec::new(&t.env));
 }
 
 /// Cancel a stream the recipient has already partially withdrawn from.
+///
+/// The recipient keeps what they took, the sender gets back only the still
+/// unvested remainder, and the withdrawn balance survives into the frozen
+/// record so the same tokens can never be refunded twice. This pins the
+/// interaction between `withdraw_amount` and `cancel`; a change to vesting,
+/// authorization, or lifecycle accounting that breaks it fails here.
 #[test]
 fn cancel_after_partial_withdrawal() {
     let t = StreamTest::setup(1_000);
@@ -55,24 +67,38 @@ fn cancel_after_partial_withdrawal() {
         &100,
     );
 
+    // Midpoint: 500 vested, 500 still locked. The recipient takes 200 of the
+    // vested half and leaves 300 behind.
     t.set_time(600);
-    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
-    assert_eq!(t.token.balance(&t.recipient), 200);
+    let withdrawn = t.contract.withdraw_amount(&id, &200);
+    assert_eq!(withdrawn, 200);
+    assert_eq!(t.token.balance(&t.recipient), withdrawn);
 
+    // The sender cancels. The refund is the unvested half; the 200 already
+    // withdrawn is not double-refunded to the sender.
     let refund = t.contract.cancel(&id);
     assert_eq!(refund, 500);
-    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.sender), refund);
     assert_eq!(t.token.balance(&t.contract.address), 300);
 
+    // The stored stream is frozen at the vested amount with the prior
+    // withdrawal still accounted for.
     let stream = t.contract.get_stream(&id);
     assert!(stream.cancelled);
     assert_eq!(stream.total_amount, 500);
     assert_eq!(stream.withdrawn, 200);
     assert_eq!(stream.end_time, 600);
 
+    // The recipient can still claim the rest of the vested balance; together
+    // with the 200 already taken that is the full vested 500, the split adds
+    // up to the original total, and the contract is drained.
     assert_eq!(t.contract.withdrawable(&id), 300);
-    assert_eq!(t.contract.withdraw(&id), 300);
-    assert_eq!(t.token.balance(&t.recipient), 500);
+    let remaining_withdrawal = t.contract.withdraw(&id);
+    assert_eq!(remaining_withdrawal, 300);
+    assert_eq!(
+        t.token.balance(&t.recipient),
+        withdrawn + remaining_withdrawal
+    );
     assert_eq!(t.token.balance(&t.contract.address), 0);
 }
 
@@ -148,6 +174,34 @@ fn cancel_immediately_after_start() {
     assert_eq!(t.contract.withdraw(&id), 1);
     assert_eq!(t.token.balance(&t.recipient), 1);
     assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// Cancelling at the exact start leaves no elapsed time to vest, so the full
+/// deposit returns to the sender and nothing is claimable by the recipient.
+#[test]
+fn cancel_at_start_time_refunds_the_full_amount() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // No time has elapsed at start_time, so none of the deposit has vested.
+    assert_eq!(t.contract.cancel(&id), 1_000);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
 }
 
 /// Cancel a stream before its cliff has been reached.
@@ -248,6 +302,33 @@ fn cancel_past_end_time_is_rejected_and_status_stays_completed() {
     assert_eq!(t.contract.withdrawable(&id), 1_000);
     assert_eq!(t.contract.withdraw(&id), 1_000);
     assert_eq!(t.token.balance(&t.recipient), 1_000);
+}
+
+#[test]
+fn second_withdraw_at_same_timestamp_is_rejected() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    assert_eq!(t.contract.withdraw(&id), 500);
+    let withdrawn_before = t.contract.get_stream(&id).withdrawn;
+
+    // Withdrawing again with no time elapsed releases nothing.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(t.contract.get_stream(&id).withdrawn, withdrawn_before);
+    assert_eq!(t.token.balance(&t.recipient), 500);
 }
 
 // ── Vesting cancel scenarios ─────────────────────────────────────────────────

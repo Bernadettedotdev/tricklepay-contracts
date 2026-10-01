@@ -3,7 +3,8 @@
 use soroban_sdk::vec;
 
 use crate::events::{Cancelled, Created, Withdrawn};
-use crate::StreamError;
+
+use crate::{StreamError, StreamStatus};
 
 use super::helpers::StreamTest;
 
@@ -38,7 +39,8 @@ fn withdraw_emits_withdrawn_after_the_payout_transfer() {
     assert_eq!(t.event_publishers(), t.transfer_then_announce());
 }
 
-/// `withdraw_amount` follows the same order as `withdraw`.
+/// `withdraw_amount` follows the same order as `withdraw`: refund first,
+/// event second.
 #[test]
 fn withdraw_amount_emits_withdrawn_after_the_payout_transfer() {
     let t = StreamTest::setup(1_000);
@@ -46,7 +48,19 @@ fn withdraw_amount_emits_withdrawn_after_the_payout_transfer() {
     let id = t.open_default_stream(1_000);
 
     t.set_time(600);
-    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
+    let recipient_balance_before = t.token.balance(&t.recipient);
+    let withdrawn = t.contract.withdraw_amount(&id, &200);
+    let transferred = t.token.balance(&t.recipient) - recipient_balance_before;
+
+    assert_eq!(withdrawn, transferred);
+    t.assert_latest_stream_event_topics(
+        Withdrawn {
+            recipient: t.recipient.clone(),
+            id,
+            amount: transferred,
+        }
+        .to_xdr(&t.env, &t.contract.address),
+    );
 
     assert_eq!(t.event_publishers(), t.transfer_then_announce());
 }
@@ -151,46 +165,66 @@ fn cancelled_event_topics_index_sender() {
     let id = t.open_default_stream(1_000);
 
     t.set_time(600);
+    let recipient_amount = 500;
     let refund = t.contract.cancel(&id);
 
-    assert_eq!(refund, 500);
+    assert_eq!(refund, recipient_amount);
+    // At the midpoint, the remaining escrow is split cleanly between the
+    // recipient's accrued share and the sender's refund.
+    assert_eq!(recipient_amount + refund, 1_000);
     t.assert_latest_stream_event_topics(
         Cancelled {
             sender: t.sender.clone(),
             id,
-            recipient_amount: 500,
+            recipient_amount,
             sender_refund: refund,
         }
         .to_xdr(&t.env, &t.contract.address),
     );
 
     assert_eq!(t.token.balance(&t.sender), 500);
-    assert_eq!(t.contract.status(&id), crate::StreamStatus::Cancelled);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
     assert_eq!(t.contract.get_stream(&id).total_amount, 500);
 }
 
-// ── Silence on rejection ─────────────────────────────────────────────────────
-
-/// A creation rejected for an invalid participant publishes nothing.
+/// A creation rejected for an invalid participant publishes nothing: the
+/// participant checks run before any token moves, so there is neither a
+/// transfer event nor a `Created` event for an indexer to unwind.
 #[test]
 fn rejected_create_publishes_no_events() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
+    // This contract's own address is refused by the first validation step.
     let sender = t.sender.clone();
-    assert!(t.try_create_stream_for_raw(&sender, &sender, &t.token_address, 1_000));
+    assert!(t.try_create_stream_for_raw(&sender, &t.contract.address, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &sender,
+        &sender,
+        &t.token_address,
+        1_000,
+        StreamError::InvalidParticipant,
+    );
 
     assert_eq!(t.event_publishers(), vec![&t.env]);
     t.assert_nothing_happened(1_000);
 }
 
-/// A rejection from an exhausted id counter is also silent.
+/// The same holds for a rejection that happens later in the validation order:
+/// an exhausted id counter is caught before the transfer, so the call is
+/// silent on the event stream too.
 #[test]
 fn rejected_create_on_exhausted_counter_publishes_no_events() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
     t.set_stream_count(u64::MAX);
 
-    assert!(t.try_create_stream_for_raw(&t.sender, &t.recipient, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        1_000,
+        StreamError::StreamCountExhausted,
+    );
 
     assert_eq!(t.event_publishers(), vec![&t.env]);
 }
@@ -207,17 +241,28 @@ fn rejected_create_for_invalid_amount_publishes_no_events() {
     t.assert_nothing_happened(1_000);
 }
 
-/// A rejected `withdraw` publishes nothing.
+/// A rejected `withdraw` publishes nothing either: `NothingToWithdraw` is
+/// returned before the payout, so no event describes a transfer that did not
+/// happen.
 #[test]
 fn rejected_withdraw_publishes_no_events() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
     let id = t.open_default_stream(1_000);
 
+    // Still at start_time, so nothing has vested.
     assert_eq!(
         t.contract.try_withdraw(&id),
         Err(Ok(StreamError::NothingToWithdraw))
     );
 
+    t.assert_no_stream_event_topics(
+        Withdrawn {
+            recipient: t.recipient.clone(),
+            id,
+            amount: 0,
+        }
+        .to_xdr(&t.env, &t.contract.address),
+    );
     assert_eq!(t.event_publishers(), vec![&t.env]);
 }

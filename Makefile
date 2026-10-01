@@ -10,10 +10,12 @@ WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
 # Run the same checks as CI in the same order: formatting, lints, tests.
 # Use this before opening a pull request.
-check: fmt-check lint test
+check: fmt-check lint test audit
+	./scripts/diff-interface.sh
 .PHONY: all help build wasm test fmt fmt-check lint audit clean deploy
 
-all: fmt-check lint test
+all: fmt-check lint test audit
+	./scripts/diff-interface.sh
 
 # List available targets with their descriptions.
 help:
@@ -40,13 +42,16 @@ lint: ## Lint every target and treat warnings as errors.
 	cargo clippy --all-targets -- -D warnings
 
 audit: ## Audit dependencies for known vulnerabilities.
-	cargo audit --deny warnings
+	cargo audit --deny warnings --file .cargo/audit.toml
 
 clean: ## Remove build artifacts.
 	cargo clean
 
-deploy: ## Build, install, and deploy to testnet. Pass an identity: make deploy ID=alice
-	./scripts/deploy.sh $(ID)
+deploy: ## Build, install, and deploy to testnet. Pass an identity: make deploy IDENTITY=alice
+ifndef IDENTITY
+	$(error IDENTITY is undefined. Please provide an identity argument (e.g. make deploy IDENTITY=alice))
+endif
+	./scripts/deploy.sh $(IDENTITY)
 
 help: ## Show this help message.
 	@echo "Usage: make <target>"

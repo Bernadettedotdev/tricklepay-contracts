@@ -69,6 +69,22 @@ pub struct Stream {
     pub cancelled: bool,
 }
 
+impl Stream {
+    /// Amount vested at `now` for this stream.
+    ///
+    /// Delegates to [`vesting::vested_amount`](crate::vesting::vested_amount) using this
+    /// stream's schedule and total amount.
+    pub fn vested_amount(&self, now: u64) -> i128 {
+        crate::vesting::vested_amount(
+            self.total_amount,
+            self.start_time,
+            self.end_time,
+            self.cliff_time,
+            now,
+        )
+    }
+}
+
 /// The lifecycle state of a stream, derived from its fields and the current
 /// ledger time. Returned by view calls so clients do not have to recompute
 /// the same logic.

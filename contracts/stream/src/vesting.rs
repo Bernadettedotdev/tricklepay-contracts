@@ -75,6 +75,35 @@ pub fn withdrawable_amount(vested: i128, withdrawn: i128) -> i128 {
     }
 }
 
+/// How a cancelled stream's escrow is divided between the two parties.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Settlement {
+    /// Unvested remainder returned to the sender.
+    pub refund: i128,
+    /// Vested amount the recipient has not yet withdrawn.
+    pub recipient_remaining: i128,
+}
+
+/// Split a stream's escrow at cancellation, given what has vested and what the
+/// recipient has already withdrawn.
+///
+/// # Examples
+///
+/// ```
+/// use tricklepay_stream::vesting::{settlement, Settlement};
+///
+/// assert_eq!(
+///     settlement(1000, 400, 150),
+///     Settlement { refund: 600, recipient_remaining: 250 }
+/// );
+/// ```
+pub fn settlement(total_amount: i128, vested: i128, withdrawn: i128) -> Settlement {
+    Settlement {
+        refund: total_amount - vested,
+        recipient_remaining: vested - withdrawn,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,6 +199,27 @@ mod tests {
         assert_eq!(vested_amount(TOTAL, START, END, END, END), TOTAL);
     }
 
+    /// A one-base-unit stream is the smallest meaningful schedule: every
+    /// interim value is rounded down to zero until the stream closes, then the
+    /// final unit becomes fully withdrawable. This is not a bug; it is the
+    /// expected result of floor division on a one-token total spread over a
+    /// longer duration.
+    #[test]
+    fn one_base_unit_stream_rounds_down_until_the_end() {
+        let total = 1_i128;
+        let start = 100_u64;
+        let end = 1_100_u64;
+
+        assert_eq!(vested_amount(total, start, end, start, start), 0);
+        assert_eq!(vested_amount(total, start, end, start, start + 1), 0);
+        assert_eq!(vested_amount(total, start, end, start, end - 1), 0);
+        assert_eq!(vested_amount(total, start, end, start, end), 1);
+        assert_eq!(
+            withdrawable_amount(vested_amount(total, start, end, start, end), 0),
+            1
+        );
+    }
+
     #[test]
     fn integer_division_rounds_down() {
         // 10 * 1 / 3 = 3.33, truncated to 3.
@@ -189,6 +239,27 @@ mod tests {
     #[test]
     fn withdrawable_is_zero_when_fully_taken() {
         assert_eq!(withdrawable_amount(300, 300), 0);
+    }
+
+    #[test]
+    fn settlement_splits_unvested_and_unwithdrawn() {
+        let s = settlement(TOTAL, 500, 200);
+        assert_eq!(s.refund, 500);
+        assert_eq!(s.recipient_remaining, 300);
+    }
+
+    #[test]
+    fn settlement_before_anything_vests_refunds_everything() {
+        let s = settlement(TOTAL, 0, 0);
+        assert_eq!(s.refund, TOTAL);
+        assert_eq!(s.recipient_remaining, 0);
+    }
+
+    #[test]
+    fn settlement_after_full_withdrawal_leaves_recipient_nothing() {
+        let s = settlement(TOTAL, 750, 750);
+        assert_eq!(s.refund, 250);
+        assert_eq!(s.recipient_remaining, 0);
     }
 }
 

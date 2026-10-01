@@ -1,25 +1,40 @@
 #![cfg(test)]
 
 use crate::storage::{DataKey, BUMP_THRESHOLD, ENTRY_TTL};
+use crate::StreamError;
 
 use super::helpers::StreamTest;
 
-// ── Storage key encoding ─────────────────────────────────────────────────────
+// --- Storage key encoding ---------------------------------------------------
 //
 // `DataKey` is the only thing standing between a stream record and the wrong
 // slot in storage. `StreamCount` and `Stream(id)` must encode to different
 // keys, every id must encode to its own key across the whole `u64` range, and
-// the two live in different storage types.
+// the two live in different storage types. None of that is checked by the
+// entry points, which report `StreamNotFound` whether a key is missing or
+// merely holds something unexpected — so these tests read the raw keys.
 
-/// Each stream id encodes to its own persistent key.
+/// Each stream id encodes to its own persistent key. Three streams written in
+/// a row occupy `Stream(0)`, `Stream(1)` and `Stream(2)` and do not overwrite
+/// one another; the id one past the last is absent rather than aliasing.
 #[test]
 fn stream_ids_map_to_distinct_persistent_keys() {
     let t = StreamTest::setup(6_000);
     t.set_time(100);
 
+    // Distinct amounts so an aliased key shows up as a wrong value, not just a
+    // wrong count.
     let first = t.open_default_stream(1_000);
+    assert_eq!(t.contract.stream_count(), 1);
+    assert_eq!(t.contract.get_stream(&first).total_amount, 1_000);
+
     let second = t.open_default_stream(2_000);
+    assert_eq!(t.contract.stream_count(), 2);
+    assert_eq!(t.contract.get_stream(&second).total_amount, 2_000);
+
     let third = t.open_default_stream(3_000);
+    assert_eq!(t.contract.stream_count(), 3);
+    assert_eq!(t.contract.get_stream(&third).total_amount, 3_000);
     assert_eq!((first, second, third), (0, 1, 2));
 
     assert!(t.persistent_has(&DataKey::Stream(0)));
@@ -27,16 +42,23 @@ fn stream_ids_map_to_distinct_persistent_keys() {
     assert!(t.persistent_has(&DataKey::Stream(2)));
     assert!(!t.persistent_has(&DataKey::Stream(3)));
 
+    // Each key holds its own record.
     assert_eq!(
-        t.persistent_stream(&DataKey::Stream(0)).unwrap().total_amount,
+        t.persistent_stream(&DataKey::Stream(0))
+            .unwrap()
+            .total_amount,
         1_000
     );
     assert_eq!(
-        t.persistent_stream(&DataKey::Stream(1)).unwrap().total_amount,
+        t.persistent_stream(&DataKey::Stream(1))
+            .unwrap()
+            .total_amount,
         2_000
     );
     assert_eq!(
-        t.persistent_stream(&DataKey::Stream(2)).unwrap().total_amount,
+        t.persistent_stream(&DataKey::Stream(2))
+            .unwrap()
+            .total_amount,
         3_000
     );
 }
@@ -105,14 +127,23 @@ fn stream_records_round_trip_under_their_key() {
     assert!(!stored.cancelled);
 }
 
-/// A rejected create writes no storage key and consumes no id.
+/// A creation rejected because the contract's own address was passed as
+/// `recipient` writes no key at all. The participant checks run before the
+/// transfer and before storage, so `Stream(0)` stays empty and the id is not
+/// consumed.
 #[test]
 fn rejected_create_writes_no_storage_key() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
 
     let contract_address = t.contract.address.clone();
-    assert!(t.try_create_stream_for_raw(&t.sender, &contract_address, &t.token_address, 1_000));
+    t.assert_create_stream_error(
+        &t.sender,
+        &contract_address,
+        &t.token_address,
+        1_000,
+        StreamError::InvalidParticipant,
+    );
 
     assert!(!t.persistent_has(&DataKey::Stream(0)));
     t.assert_nothing_happened(1_000);
@@ -207,6 +238,53 @@ fn cancelling_restores_a_decayed_stream_ttl() {
 
     assert_eq!(t.stream_ttl(id), ENTRY_TTL);
     assert_eq!(t.contract.withdrawable(&id), 500);
+}
+
+/// A cancelled stream still holds the recipient's accrued balance, so a
+/// plain read of it — not just the write inside `cancel` itself — must keep
+/// refreshing the entry, or the record could be archived out from under a
+/// recipient who has not yet come back to withdraw (issue #314).
+#[test]
+fn reading_a_cancelled_stream_below_the_threshold_restores_its_ttl() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    t.set_time(600);
+    assert_eq!(t.contract.cancel(&id), 500);
+    // cancel() itself writes, which already refreshes the entry.
+    assert_eq!(t.stream_ttl(id), ENTRY_TTL);
+
+    // Let the now-cancelled entry decay again.
+    let elapsed = ENTRY_TTL - BUMP_THRESHOLD + 1;
+    t.set_sequence(elapsed);
+    assert!(ENTRY_TTL - elapsed < BUMP_THRESHOLD);
+
+    // A plain view call on the cancelled stream still bumps it.
+    let stream = t.contract.get_stream(&id);
+    assert!(stream.cancelled);
+    assert_eq!(t.stream_ttl(id), ENTRY_TTL);
+
+    // The stream keeps answering well past where it would have been
+    // archived without that bump.
+    t.set_sequence(elapsed + ENTRY_TTL - BUMP_THRESHOLD + 1);
+    assert!(t.contract.get_stream(&id).cancelled);
+}
+
+/// Views authorize nothing, write nothing, and move no tokens, so two
+/// consecutive reads of a stream nobody has touched must be byte-identical.
+/// A refresh that mutated a field (rather than only the entry's TTL) would
+/// show up here (issue #317).
+#[test]
+fn reading_a_stream_twice_returns_identical_data() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.open_default_stream(1_000);
+
+    let first = t.contract.get_stream(&id);
+    let second = t.contract.get_stream(&id);
+
+    assert_eq!(first, second);
 }
 
 /// Touching one stream does not extend another.

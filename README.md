@@ -12,6 +12,24 @@ This repository holds the `stream` contract and its test suite. The indexer and
 web client that build on it live in separate repositories; see
 [Related repositories](#related-repositories).
 
+Integrator-facing operational policies live in
+[docs/INTEGRATOR_OPERATIONS.md](docs/INTEGRATOR_OPERATIONS.md). That guide
+covers redeployment without upgradeability, interface stability, safe retry
+behavior after uncertain submissions, and the practical duration limits imposed
+by storage TTL.
+
+## Soroban SDK compatibility
+
+The contract targets Soroban SDK `25.3.2`, pinned to an exact version (`=25.3.2`) in the workspace
+`Cargo.toml`. The same version is used for the contract build and its test
+host.
+
+Upgrading the SDK can change generated contract clients and macros, the WASM
+build, or host behavior exercised by tests. Review the SDK release notes,
+update the workspace pin, and run the full test and lint suite. Also rebuild
+and inspect the contract interface and WASM artifact before deployment, since
+SDK changes can affect the contract ABI or what the Soroban host accepts.
+
 ## How a stream works
 
 **All timestamps are Unix seconds.** The `start_time`, `end_time`, and `cliff_time` parameters are `u64` Unix timestamps in seconds, matching the Soroban ledger clock (`env.ledger().timestamp()`). A caller using milliseconds (such as JavaScript's `Date.now()`) would create a stream that appears to never start, since a timestamp like `1735689600000` (January 1, 2025 in milliseconds) is interpreted as a date billions of years in the future when read as seconds. The contract does not validate timestamp magnitude or convert units; the caller must ensure all times are in seconds.
@@ -36,7 +54,7 @@ A stream is defined by a total amount and a window of time:
 - **Cliff** (optional) is a point before which nothing can be withdrawn. When
   the cliff is reached, everything accrued since the start unlocks at once and
   vesting continues linearly from there. `cliff_time` must fall inside
-  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`.
+  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`
 
   **A stream has no cliff when `cliff_time == start_time`.** There is no
   separate flag or null value to pass — the cliff is always a timestamp, and
@@ -92,7 +110,7 @@ Without a cliff, `cliff_time == start_time == 100` (no cliff):
 With a cliff at the midpoint, `cliff_time == 600`:
 
 | Time | Vested | Locked | Description                                                                 |
-| ---- | ------ | ------ | ----------------------------------------------------------------------------- |
+| ---- | ------ | ------ | --------------------------------------------------------------------------- |
 | 300  | 0      | 1000   | past the start, but the cliff has not been reached; all 1000 remains locked |
 | 600  | 500    | 500    | the cliff releases everything accrued since the start, unlocking 500        |
 | 850  | 750    | 250    | vesting continues linearly from the cliff onward                            |
@@ -110,11 +128,12 @@ tokens, but `withdraw` always sweeps the full available balance while
 the rest streaming.
 
 Using the same no-cliff reference stream from [Example schedule](#example-schedule)
-- 1000 units, `start_time = 100`, `end_time = 1100` - at `now = 600` the
-midpoint has been reached, so 500 units have vested and none have been
-withdrawn yet:
 
-    withdrawable(id) == 500
+- 1000 units, `start_time = 100`, `end_time = 1100` - at `now = 600` the
+  midpoint has been reached, so 500 units have vested and none have been
+  withdrawn yet:
+
+      withdrawable(id) == 500
 
 The recipient draws only 200 of it:
 
@@ -163,6 +182,7 @@ can then claim the remaining 300 of their vested share:
 cancel(id)           -> 500   // sender refund (unvested only)
 withdraw(id)         -> 300   // recipient claims their remaining vested balance
 ```
+
 ### Worked example: vesting schedule with a cliff
 
 This example uses a one-year stream with a three-month cliff — the shape
@@ -171,12 +191,12 @@ step-change at the cliff is easy to see.
 
 **Parameters:**
 
-| Field | Value | Unix seconds |
-| ----- | ----- | ------------ |
-| `total_amount` | 12 000 units | — |
-| `start_time` | 1 Jan 2025 00:00 UTC | `1735689600` |
-| `cliff_time` | 1 Apr 2025 00:00 UTC | `1743465600` |
-| `end_time` | 1 Jan 2026 00:00 UTC | `1767225600` |
+| Field          | Value                | Unix seconds |
+| -------------- | -------------------- | ------------ |
+| `total_amount` | 12 000 units         | —            |
+| `start_time`   | 1 Jan 2025 00:00 UTC | `1735689600` |
+| `cliff_time`   | 1 Apr 2025 00:00 UTC | `1743465600` |
+| `end_time`     | 1 Jan 2026 00:00 UTC | `1767225600` |
 
 Duration = 365 days = 31 536 000 seconds.  
 Cliff offset from start = 90 days = 7 776 000 seconds.
@@ -196,7 +216,7 @@ create_stream(
 
 **Withdrawable amount at three points in time:**
 
-*Before the cliff — 1 Feb 2025 (`now = 1738368000`):*
+_Before the cliff — 1 Feb 2025 (`now = 1738368000`):_
 
 ```
 elapsed = 1738368000 - 1735689600 = 2678400 s  (31 days)
@@ -208,7 +228,7 @@ One month has passed since the start and 1/12 of the total has accrued by the
 linear schedule, but the cliff gate is still blocking it. Nothing can be
 withdrawn yet.
 
-*At the cliff — 1 Apr 2025 (`now = 1743465600`):*
+_At the cliff — 1 Apr 2025 (`now = 1743465600`):_
 
 ```
 elapsed = 1743465600 - 1735689600 = 7776000 s  (90 days)
@@ -220,7 +240,7 @@ The cliff releases the entire 90 days of accrual in one step. The recipient
 can withdraw up to 2958 units immediately, even though nothing was available
 one second earlier.
 
-*Six months in — 1 Jul 2025 (`now = 1751328000`):*
+_Six months in — 1 Jul 2025 (`now = 1751328000`):_
 
 ```
 elapsed = 1751328000 - 1735689600 = 15638400 s  (181 days)
@@ -234,12 +254,12 @@ Vesting has continued linearly from the cliff. If the recipient withdrew the
 
 **Summary table:**
 
-| Date | `now` | Vested | Withdrawable (nothing taken yet) |
-| ---- | ----- | ------ | -------------------------------- |
-| 1 Feb 2025 (1 month in, before cliff) | `1738368000` | 0 | **0** |
-| 1 Apr 2025 (cliff, 3 months in) | `1743465600` | 2958 | **2958** |
-| 1 Jul 2025 (6 months in) | `1751328000` | 5950 | **5950** |
-| 1 Jan 2026 (end) | `1767225600` | 12000 | **12000** |
+| Date                                  | `now`        | Vested | Withdrawable (nothing taken yet) |
+| ------------------------------------- | ------------ | ------ | -------------------------------- |
+| 1 Feb 2025 (1 month in, before cliff) | `1738368000` | 0      | **0**                            |
+| 1 Apr 2025 (cliff, 3 months in)       | `1743465600` | 2958   | **2958**                         |
+| 1 Jul 2025 (6 months in)              | `1751328000` | 5950   | **5950**                         |
+| 1 Jan 2026 (end)                      | `1767225600` | 12000  | **12000**                        |
 
 The cliff does not change the rate or the total — it only withholds the first
 90 days of accrual and releases it all at once when `now` reaches `cliff_time`.
@@ -279,14 +299,14 @@ Using the no-cliff reference stream — 1000 units, `start_time = 100`,
 `end_time = 1100` — at `now = 1100` (the end), after the recipient has called
 `withdraw` and received all 1000 units:
 
-| View | Return value | Reason |
-| ---- | ------------ | ------ |
-| `get_stream` | stream record with `withdrawn = 1000`, `cancelled = false` | the record is never deleted |
-| `withdrawable(id)` | `0` | `vested(1000) - withdrawn(1000) = 0` |
-| `vested(id)` | `1000` | at or after `end_time`, the full amount has vested |
-| `locked(id)` | `0` | `total_amount(1000) - vested(1000) = 0` |
-| `progress(id)` | `10000` | 100 % — fully vested |
-| `status(id)` | `Completed` | `now >= end_time` and the stream was not cancelled |
+| View               | Return value                                               | Reason                                             |
+| ------------------ | ---------------------------------------------------------- | -------------------------------------------------- |
+| `get_stream`       | stream record with `withdrawn = 1000`, `cancelled = false` | the record is never deleted                        |
+| `withdrawable(id)` | `0`                                                        | `vested(1000) - withdrawn(1000) = 0`               |
+| `vested(id)`       | `1000`                                                     | at or after `end_time`, the full amount has vested |
+| `locked(id)`       | `0`                                                        | `total_amount(1000) - vested(1000) = 0`            |
+| `progress(id)`     | `10000`                                                    | 100 % — fully vested                               |
+| `status(id)`       | `Completed`                                                | `now >= end_time` and the stream was not cancelled |
 
 Calling `withdraw` again after the balance is zero returns
 `Err(NothingToWithdraw)` — nothing is transferred and nothing is recorded.
@@ -333,6 +353,182 @@ make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 > Some transitive Soroban test-host dependencies are allowlisted in
 > `.cargo/audit.toml` because they are not compiled into the deployed WASM.
 > See [`.cargo/AUDIT.md`](.cargo/AUDIT.md) for the full explanation.
+
+## Implementation details
+
+### Ledger time as the source of truth
+
+Vesting uses the **ledger close time** (`env.ledger().timestamp()`) rather than wall clock time. This means vesting advances in discrete steps tied to ledger closes, not continuously. The Stellar ledger closes roughly every 5 seconds, so a stream's vested balance jumps forward in 5-second increments rather than updating smoothly every millisecond.
+
+**Practical implications:**
+
+- A client showing a countdown or live vesting progress bar should be aware that the on-chain state updates in ledger-sized steps. A smooth countdown on the client side is a UI convenience — it does not reflect how the contract sees time.
+- **No off-chain process or keeper is required.** The contract reads the current ledger time whenever a view or mutating call is made, so vesting progresses automatically without any external automation or scheduled job.
+- When you call `vested(id)` or `withdrawable(id)`, the result is computed from the ledger timestamp at that instant. Two calls in the same transaction see the same time; two calls in different ledgers may see different vested amounts even if only seconds have elapsed.
+
+**Reference point for clients:** When deriving remaining time or vested amount in your application, use the ledger timestamp returned by the network as your reference point, not the local system clock. Query the ledger time alongside the stream state to ensure your calculations match what the contract will report on the next call.
+
+### Deriving the remaining time
+
+To show how much time is left in a stream, a client must compute the remaining duration from the stream's schedule fields. Doing this consistently with the contract's own arithmetic requires using the same reference point: the **ledger close time** (`env.ledger().timestamp()`), not the client's wall clock.
+
+**Formula:**
+
+```
+remaining_seconds = end_time - now
+```
+
+where `now` is the current ledger timestamp. If `now >= end_time`, the stream is fully vested and `remaining_seconds` is zero (or negative, which should be clamped to zero for display).
+
+**Worked example:**
+
+Using a stream with `start_time = 1735689600` (1 Jan 2025), `end_time = 1738368000` (1 Feb 2025), queried at ledger time `now = 1737072000` (17 Jan 2025):
+
+```
+remaining_seconds = 1738368000 - 1737072000 = 1296000 seconds
+remaining_days = 1296000 / 86400 = 15 days
+```
+
+The stream has 15 days remaining until it is fully vested.
+
+**Important:** Always query the ledger time from the Stellar network (via an RPC call or by inspecting the latest ledger header) and use that value as `now`. Using `Date.now()` or a local system clock introduces skew — your countdown might say "5 seconds left" while the contract still reports 10 seconds, or vice versa, because your clock differs from the validator's consensus time.
+
+**Converting to human-readable units:**
+
+```
+remaining_days = remaining_seconds / 86400
+remaining_hours = (remaining_seconds % 86400) / 3600
+remaining_minutes = (remaining_seconds % 3600) / 60
+```
+
+All division is integer division; the remainder is discarded. For a smooth countdown in a UI, you can interpolate between ledger updates, but always resync to the true ledger time on each new ledger close to avoid drift.
+
+### Rounding direction
+
+Integer division in the vesting formula **truncates** (rounds down), which means fractional tokens are never credited early. The formula `total_amount * elapsed / duration` discards any remainder from the division, so the vested amount is always the floor of the mathematically exact value.
+
+**Which party does this favor?**
+
+Rounding down **favors the sender** (and delays the recipient). A fractional token that has partially vested is not yet withdrawable by the recipient. It only becomes available once enough additional time has passed to push the vested amount over the next whole-token boundary.
+
+**Maximum size of the difference:**
+
+The rounding error per calculation is **less than 1 unit** of the token. Because the contract never adds a fractional result to `withdrawn` or anywhere else, the difference between the true mathematical vested amount and the truncated integer amount is bounded by `0 ≤ error < 1`. Over the life of a stream, this sub-unit remainder may accumulate across multiple vesting steps, but the recipient receives the correct total by the `end_time` because the final calculation `vested_amount(total_amount, start_time, end_time, cliff_time, end_time)` returns exactly `total_amount` with no division.
+
+**Practical impact:**
+
+For a token with 7 decimals (like USDC on Stellar, where 1 USDC = 10⁷ stroops), the maximum rounding difference is 0.0000001 USDC — economically negligible. For a stream of 1,000 tokens over 1,000,000 seconds, the recipient might be short by a fraction of a stroop at any given instant, but will receive the full 1,000 tokens by the end.
+
+**Example:**
+
+Stream of 10 tokens over 3 seconds, queried at `now = start_time + 1`:
+
+```
+vested = 10 * 1 / 3 = 3.333... → truncated to 3
+```
+
+The recipient can withdraw 3 tokens, not 3.333. The remaining 0.333 tokens are still locked and will vest as time progresses. At `now = start_time + 2`:
+
+```
+vested = 10 * 2 / 3 = 6.666... → truncated to 6
+```
+
+At `end_time`:
+
+```
+vested = 10 * 3 / 3 = 10 (exact, no truncation)
+```
+
+The truncation never causes the recipient to lose tokens — it only delays when fractional amounts become available.
+
+### Full amount escrowed at creation
+
+When a stream is created, the **entire `total_amount` is transferred from the sender to the contract** in the same transaction. This is a deliberate design choice that removes the need for the recipient to trust the sender's future behavior.
+
+**Why escrow the full amount up front?**
+
+1. **Trustless guarantee for the recipient:** The recipient is guaranteed that the tokens exist and are locked in the contract for the duration of the stream. There is no risk that the sender will fail to pay, run out of funds, or renege on the agreement. The vested amount is always claimable, regardless of what the sender does afterward.
+
+2. **Simplifies the contract:** Because the contract holds the full amount, it does not need to handle partial funding, top-ups, or the complexity of a sender failing to deliver. Every stream is fully funded from the moment it is created, so the vesting logic is purely time-based arithmetic with no external dependencies.
+
+3. **Enables cancellation refunds:** The sender can cancel a stream and immediately receive the unvested remainder back. This is only possible because the full amount is already in the contract — there is no need to track or enforce future payments.
+
+**Trade-off: capital cost to the sender:**
+
+The sender must **lock the full amount up front**, which means that capital is not available for other uses during the stream's lifetime. For a one-year stream of 120,000 tokens, the sender must have 120,000 tokens free at creation time, even though the recipient will draw them down gradually over the year.
+
+This is the price of the trustless guarantee. The sender is giving up liquidity in exchange for the ability to cancel and reclaim the unvested portion at any point. If the sender cannot afford to lock the full amount, a stream is not the right primitive — a manual payment schedule or a different escrow arrangement would be needed instead.
+
+**Comparison to alternatives:**
+
+- **Pay-as-you-go:** The sender transfers tokens at regular intervals (e.g., monthly payroll). This preserves sender liquidity but requires the recipient to trust that future payments will arrive. If the sender stops paying, the recipient has no recourse.
+- **Incremental escrow:** The contract pulls tokens from the sender as they vest. This reduces the sender's locked capital but adds complexity: the contract must handle insufficient balances, failed transfers, and partial funding. It also weakens the recipient's guarantee — tokens might not be available when they vest.
+- **Full escrow (this design):** The sender locks everything up front, the recipient is guaranteed every vested token, and the contract logic is simple and trust-minimized. The sender retains the right to cancel and reclaim unvested funds, so the capital is not fully at risk.
+
+The full-escrow model is the right fit for use cases where the recipient needs a strong guarantee (employee compensation, vesting grants, subscription prepayment) and the sender can afford to lock the capital. For scenarios where liquidity is more important than trustlessness, a different mechanism would be more appropriate.
+
+## Events
+
+Every mutating entry point publishes a Soroban event when it succeeds. Rejected
+calls publish nothing. Indexers and off-chain consumers use these events to
+track stream state without follow-up `get_stream` calls, and to filter streams
+by participant address.
+
+**Field order is part of the interface.** The Soroban event encoding preserves
+declaration order, so reordering fields in any event struct is a breaking change
+for downstream consumers — treat it with the same care as renaming a field or
+changing its type.
+
+Each event has a set of _topics_ (marked `#[topic]`) that the network indexes
+for efficient filtering, and a _data_ payload containing the remaining fields.
+Topics appear first in the encoding; the data fields follow in declaration order.
+
+### `Created`
+
+Emitted by `create_stream` when a new stream is opened successfully.
+
+| Field          | Kind  | Type      | Description                                                                                                |
+| -------------- | ----- | --------- | ---------------------------------------------------------------------------------------------------------- |
+| `sender`       | topic | `Address` | The address that funded the stream                                                                         |
+| `recipient`    | topic | `Address` | The address that will receive the vested tokens                                                            |
+| `id`           | data  | `u64`     | The id assigned to the new stream                                                                          |
+| `token`        | data  | `Address` | The token contract address                                                                                 |
+| `total_amount` | data  | `i128`    | Total tokens locked into the stream                                                                        |
+| `start_time`   | data  | `u64`     | Unix timestamp (seconds) when vesting begins                                                               |
+| `end_time`     | data  | `u64`     | Unix timestamp (seconds) when the stream is fully vested                                                   |
+| `cliff_time`   | data  | `u64`     | Unix timestamp (seconds) before which nothing can be withdrawn; equals `start_time` when there is no cliff |
+
+Indexers can subscribe on the `sender` or `recipient` topics to receive all
+streams for a given address without scanning every event.
+
+### `Withdrawn`
+
+Emitted by both `withdraw` and `withdraw_amount` when tokens are transferred to
+the recipient.
+
+| Field       | Kind  | Type      | Description                               |
+| ----------- | ----- | --------- | ----------------------------------------- |
+| `recipient` | topic | `Address` | The address that received the tokens      |
+| `id`        | data  | `u64`     | The stream that was drawn from            |
+| `amount`    | data  | `i128`    | Number of tokens transferred in this call |
+
+### `Cancelled`
+
+Emitted by `cancel` when a sender stops a stream early. Both sides of the split
+are included so an indexer can record the final state without a follow-up
+`get_stream` call.
+
+| Field              | Kind  | Type      | Description                                                       |
+| ------------------ | ----- | --------- | ----------------------------------------------------------------- |
+| `sender`           | topic | `Address` | The address that cancelled the stream and received the refund     |
+| `id`               | data  | `u64`     | The stream that was cancelled                                     |
+| `recipient_amount` | data  | `i128`    | Vested tokens still claimable by the recipient after cancellation |
+| `sender_refund`    | data  | `i128`    | Unvested tokens immediately refunded to the sender                |
+
+Note that `recipient_amount` reflects the _remaining claimable balance_ at
+cancellation time (vested minus already withdrawn), not the total that had
+vested. The sender refund covers only the unvested portion; tokens the recipient
+had already withdrawn are not returned.
 
 ## Reading the contract interface
 
@@ -534,6 +730,7 @@ Save that `C...` address. It is the `<CONTRACT_ID>` you pass to every later
 `stellar contract invoke` and to the verification steps in
 [Verifying a deployment](#verifying-a-deployment). The script exits non-zero,
 without deploying, if the build fails or the identity is unknown or unfunded.
+
 ### Step 2 — fetch the on-chain bytecode hash
 
 Every contract uploaded to a Stellar network is stored as a Wasm entry keyed
@@ -573,6 +770,7 @@ on a Linux host (or a Docker image with the pinned Rust toolchain) before
 concluding that the deployment differs from the source.
 
 ## Project structure
+
 A `cancel` call is rejected with `StreamAlreadyCompleted` if `now >= end_time`
 — once the stream has fully vested there is nothing unvested to refund. A
 stream that has already been cancelled cannot be cancelled again
@@ -590,6 +788,15 @@ A few common edge cases are worth keeping explicit:
   the cancellation instant, and the sender receives only the remaining unvested
   balance.
 
+### Deliberately omitted validations
+
+The contract deliberately does not validate some inputs that might look questionable, to ensure it does not break legitimate use cases:
+
+- **Sender and recipient being the same address:** A stream from an address to itself has the effect of locking the sender's own tokens and handing them back over time. This is a legitimate way to enforce a personal vesting schedule or lockup, so it is accepted rather than rejected.
+- **Token acting as a participant:** A token contract acting as the `sender` or `recipient` is permitted. Rejecting this could break legitimate smart contract composability.
+- **Start time in the past:** Accepted as long as `end_time` is in the future. The elapsed portion vests immediately, which is useful for backdating streams.
+
+
 ### Integer rounding
 
 Vested amounts are computed as:
@@ -606,6 +813,35 @@ Because this is **integer (truncating) division**, any fractional stroop is
 discarded toward zero. The recipient is never credited more than their exact
 linear share — the rounding always favours the contract.
 
+### Amount ceiling
+
+`create_stream` rejects any `total_amount` greater than **`i64::MAX`
+(9 223 372 036 854 775 807 stroops, approximately 9.2 × 10¹⁸)**. This is not
+an arbitrary policy limit — it is a safety bound derived from the vesting
+arithmetic.
+
+The vesting formula multiplies `total_amount` by an elapsed-time value before
+dividing:
+
+```
+vested = total_amount * elapsed / duration
+```
+
+Both `total_amount` and `elapsed` are widened to `i128` for the multiplication.
+`elapsed` can be at most `u64::MAX` seconds (the full range of the Soroban
+ledger clock). For the product to stay within `i128::MAX` for every possible
+elapsed value, `total_amount` must satisfy:
+
+```
+total_amount * u64::MAX ≤ i128::MAX
+total_amount ≤ i128::MAX / u64::MAX ≈ 5.0 × 10¹⁸
+```
+
+`i64::MAX` (≈ 9.2 × 10¹⁸) is above that quotient, so the bound used in the
+contract is slightly conservative, but it is the cleanest expressible limit and
+is well above the total supply of any realistic token. A call that exceeds the
+ceiling is rejected with `AmountTooLarge` before any tokens move.
+
 **No-cliff example:** a stream of **1000 units over `[100, 1100]`** with
 `cliff_time == start_time == 100` (no cliff):
 
@@ -617,12 +853,14 @@ linear share — the rounding always favours the contract.
 | 1100 | 1000      | 1000.0      | 1000               |
 
 The schedule above divides evenly, so truncation has no visible effect. To see
-it, consider **10 units over 
+it, consider \*\*10 units over
 
 ## Recent Changes
+
 - Ongoing improvements and fixes as part of active development.
 - See commit history and open issues for detailed change tracking.
 
 ## Recent Changes
+
 - Ongoing improvements and fixes as part of active development.
 - See commit history and open issues for detailed change tracking.
