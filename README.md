@@ -18,6 +18,11 @@ covers redeployment without upgradeability, interface stability, safe retry
 behavior after uncertain submissions, and the practical duration limits imposed
 by storage TTL.
 
+A formal audit is the gate between this contract and production use (see
+[SECURITY.md](SECURITY.md)). [docs/AUDIT_READINESS.md](docs/AUDIT_READINESS.md)
+is the checklist of what must be in place — invariants, threat model, and test
+coverage — before engaging an auditor.
+
 ## Soroban SDK compatibility
 
 The contract targets Soroban SDK `25.3.2`, pinned to an exact version (`=25.3.2`) in the workspace
@@ -318,6 +323,42 @@ non-zero `withdrawable` or `locked` alongside the same `Completed` status,
 which means tokens remain unclaimed. The `get_stream` view exposes the raw
 `withdrawn` and `total_amount` fields for a precise accounting check:
 `withdrawn == total_amount` confirms the recipient has taken everything.
+
+## Token interface
+
+The `token` address passed to `create_stream` must implement the **SEP-41
+Token Interface** — the same interface the Stellar Asset Contract (SAC)
+implements for classic Stellar assets, and the one any custom Soroban token
+should implement to be usable here. The contract talks to it through
+`soroban_sdk::token::TokenClient` (`contracts/stream/src/contract.rs`).
+
+**The only operation the contract calls is `transfer`.** It is invoked at four
+points, always moving tokens to or from the contract's own address:
+
+- `create_stream` — pulls `total_amount` from the sender into the contract.
+- `withdraw` / `withdraw_amount` — pays the recipient their vested, unwithdrawn
+  balance.
+- `cancel` — refunds the sender whatever has not yet vested.
+
+Nothing else on the token is called: no `balance`, `approve`, or `allowance`
+check, and no admin or minting function. A token that implements `transfer`
+correctly is sufficient for this contract regardless of what else it does or
+doesn't support.
+
+**Symptom of a non-conforming token.** The contract assumes `transfer` moves
+exactly the requested amount, charges no undisclosed fee, and either succeeds
+or fails atomically with no partial effect; it never re-checks balances
+afterward. A token that violates this doesn't produce a typed `StreamError` —
+there is no error variant for a bad token, because the failure is the token's,
+not the stream contract's. Instead it shows up as behavior that looks like a
+bug in this contract: a `withdraw` that reports success while the recipient
+receives less than the vesting math promised (a token that short-transfers or
+takes a fee), every call on a stream failing or reverting forever (a token
+that always traps), or unexpected reentrant behavior around a transfer (a
+token that calls back into this contract from within `transfer`). See
+[THREAT_MODEL.md § Trust assumptions about the token contract](THREAT_MODEL.md#trust-assumptions-about-the-token-contract)
+and [§ What happens when a token transfer fails](THREAT_MODEL.md#what-happens-when-a-token-transfer-fails)
+for the full breakdown and who is responsible for choosing a conforming token.
 
 ## Development workflow
 
