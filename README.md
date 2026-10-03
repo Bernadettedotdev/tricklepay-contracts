@@ -405,6 +405,47 @@ make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 > `.cargo/audit.toml` because they are not compiled into the deployed WASM.
 > See [`.cargo/AUDIT.md`](.cargo/AUDIT.md) for the full explanation.
 
+### Reading the test suite
+
+The suite is organised by behaviour, not by entry point, so a failing test
+points at which part of the contract's rules broke rather than just which
+function was called. It lives in two places:
+
+- **`contracts/stream/src/vesting.rs`** has its own `#[cfg(test)] mod tests`
+  testing the vesting arithmetic in isolation, with no contract or ledger
+  environment involved: fixed-example unit tests
+  (`nothing_vests_before_start`, `cliff_releases_accrued_amount_at_once`,
+  `integer_division_rounds_down`) plus a `proptest!` block
+  (`vested_between_zero_and_total`, `vested_is_monotonic_in_now`,
+  `withdrawable_equals_vested_minus_withdrawn_when_withdrawn_le_vested`) that
+  checks those same properties hold across randomly generated schedules and
+  timestamps, not just the handful of examples above them.
+- **`contracts/stream/src/tests/`** has the integration suite, run against
+  the generated contract client, split into one file per functional area.
+  The table below names where to look for each behaviour; it mirrors the
+  module doc comment at the top of
+  [`tests/mod.rs`](contracts/stream/src/tests/mod.rs), which is the
+  authoritative, always-current version of this list.
+
+| File              | Covers                                                                                           | Representative tests                                                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `creation.rs`     | `create_stream` validation: schedule and amount bounds, participant checks, id-counter exhaustion, deterministic validation order | `create_stream_rejects_invalid_parameters`, `create_stream_rejects_amount_above_max`, `create_stream_rejects_the_contract_as_recipient`, `create_stream_validation_order_is_deterministic`, `stream_id_counter_overflow_fails_closed` |
+| `withdrawal.rs`   | `withdraw`/`withdraw_amount`: stepwise vesting, cliff gating, partial draws, exact-end and exact-cliff boundaries, double-withdraw and unknown-id guards | `withdraw_releases_vested_in_steps`, `cliff_blocks_withdrawal_until_reached`, `withdraw_amount_available_plus_one_receives_insufficient_balance`, `operations_on_unknown_stream_report_not_found` |
+| `cancellation.rs` | `cancel`: the vested/refund split, boundary timing (start, cliff, end), rejecting a second cancel or one after completion | `cancel_refunds_unvested_and_preserves_vested`, `cancel_with_cliff_not_reached`, `cancel_on_stream_at_end_time_is_rejected`, `test_repeated_cancel_fails` |
+| `views.rs`        | Read-only queries (`progress`, `locked`, `status`, etc.): monotonicity over time, correctness on a cancelled stream, no state or event side effects | `progress_never_decreases_as_time_advances`, `locked_never_goes_negative_across_sampled_times`, `views_are_correct_on_a_cancelled_stream`, `test_view_functions_publish_no_events` |
+| `events.rs`       | Event ordering and topic correctness for every entry point, and silence on a rejected call        | `create_emits_created_after_the_funding_transfer`, `lifecycle_events_follow_operation_order`, `created_event_topics_index_sender_and_recipient`, `rejected_create_publishes_no_events` |
+| `storage.rs`      | `DataKey` encoding across the id range, and persistent/instance TTL bumps on both sides of `BUMP_THRESHOLD` | `stream_ids_map_to_distinct_persistent_keys`, `a_stream_entry_ttl_decays_with_the_ledger_sequence`, `withdrawing_restores_a_decayed_stream_ttl`, `view_calls_do_not_extend_the_instance_ttl` |
+| `auth.rs`         | Authorization requirements for every mutating entry point                                         | `withdraw_requires_recipient_authorization`, `cancel_requires_sender_authorization`, `test_third_party_cannot_mutate_streams`              |
+| `helpers.rs`      | Not tests itself — the `StreamTest` fixture and clock helpers (`set_time`, `set_sequence`) every file above builds on | —                                                                                                                                             |
+
+If you are trying to understand a specific rule — what exactly happens at an
+exact cliff, how a cancellation splits funds, what a rejected call leaves
+behind — the fastest path is usually to search these files for the behaviour
+by name rather than re-reading `contract.rs`; the test names are written to
+describe the rule, not the function under test. See
+[CONTRIBUTING.md § Writing a test for a new behaviour](CONTRIBUTING.md#writing-a-test-for-a-new-behaviour)
+for the conventions a new test should follow.
+
 ### Measuring the compiled contract size
 
 The compiled WASM is what actually gets installed on-chain, and Soroban's
@@ -546,6 +587,52 @@ This is the price of the trustless guarantee. The sender is giving up liquidity 
 - **Full escrow (this design):** The sender locks everything up front, the recipient is guaranteed every vested token, and the contract logic is simple and trust-minimized. The sender retains the right to cancel and reclaim unvested funds, so the capital is not fully at risk.
 
 The full-escrow model is the right fit for use cases where the recipient needs a strong guarantee (employee compensation, vesting grants, subscription prepayment) and the sender can afford to lock the capital. For scenarios where liquidity is more important than trustlessness, a different mechanism would be more appropriate.
+
+### `locked`: a precise figure, not a synonym for "still escrowed"
+
+"Locked" and "unvested" get used interchangeably in conversation, but
+`locked(id)` reports one specific number:
+
+```
+locked = max(total_amount - vested_amount(now), 0)
+```
+
+This is **the unvested remainder of the schedule** — the portion time has
+not reached yet — not "everything this stream still holds in the contract."
+Those are two different figures that happen to be equal only part of the
+time.
+
+**How it relates to the escrowed balance.** At any moment, what a stream
+still has sitting in the contract is `total_amount - withdrawn`, and that
+splits into two independent pieces:
+
+- `locked` — vested amount, not yet claimable by anyone.
+- `withdrawable` — vested but not yet withdrawn, claimable by the recipient
+  right now.
+
+`locked + withdrawable == total_amount - withdrawn` holds at every point in
+an active stream's life (this is exactly the split `vesting::settlement`
+computes for `cancel`). A fully vested stream whose recipient has not yet
+withdrawn reports `locked = 0` while still holding its entire remaining
+balance in escrow — that balance shows up in `withdrawable`, not `locked`.
+So `locked == 0` means "nothing left to vest," never "nothing left in the
+contract."
+
+`locked` is also exactly what `cancel` would refund the sender right now —
+cancellation returns the unvested remainder, which is this figure at the
+instant of cancellation.
+
+**How cancellation changes what `locked` means.** `cancel` refunds the
+current `locked` value to the sender, then freezes the stream: `total_amount`
+is cut down to the vested amount at that instant and `end_time` is set to
+`now` (see
+[THREAT_MODEL.md § Invariants](THREAT_MODEL.md#invariants)). Recomputing
+`vested_amount` for any later time then returns that same frozen total, so
+`locked` is `0` forever after — but for a different reason than it was `0`
+at full vesting: there is no schedule left to run, not because the contract
+already paid out everything for that stream. A cancelled stream's
+vested-but-unwithdrawn balance, if the recipient has not claimed it yet,
+still exists in escrow and is reported by `withdrawable`, not `locked`.
 
 ## Events
 
@@ -746,22 +833,10 @@ The audit ignores the unmaintained `derivative` and `paste` crates
 and are not used in the deployed WASM. Vulnerability advisories remain enabled;
 see `.cargo/audit.toml` for the allowlist.
 
-The suite covers the vesting math in isolation and the contract end to end:
-stepwise withdrawal, partial withdrawal and its over-request and non-positive
-guards, cliff gating, cancellation splits, the `locked` and `progress` views
-across a stream's life, the cliff and no-cliff schedules documented above,
-authorization requirements, invalid input, past and
-boundary time-window rejection, backdated-start acceptance, multiple token
-parallel streams, id-counter exhaustion at the `u64::MAX` boundary, rejection
-of the contract's own address in each participant role, self-streams, the
-documented precedence between validation groups, and double-withdraw and unknown-id guards.
-
-It also covers the storage and event behaviour described above: the order in
-which each entry point moves tokens and publishes its event, the indexed
-event topics, the silence of a rejected call on the event stream, `DataKey`
-encoding across the id range, and
-the persistent-entry and instance time-to-live bumps on both sides of
-`BUMP_THRESHOLD`.
+The suite covers the vesting math in isolation and the contract end to end,
+including the storage and event behaviour described above. See
+[Reading the test suite](#reading-the-test-suite) for which file and which
+named test covers a given behaviour.
 
 ## Deploying to testnet
 
