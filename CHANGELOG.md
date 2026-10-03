@@ -44,7 +44,10 @@ Entries without the tag are safe to skip for that purpose.
 
 Nothing has been released yet and no version is tagged; `0.1.0` is still in
 development. All changes below are unreleased and recorded here so downstream
-consumers have a single document to track.
+consumers have a single document to track. See
+[CONTRIBUTING.md § Release process](CONTRIBUTING.md#release-process) for how
+this section turns into a tagged release and how a tag relates to a deployed
+contract.
 
 ### Changed
 

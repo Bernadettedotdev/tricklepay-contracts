@@ -29,6 +29,10 @@ A formal audit is the gate between this contract and production use (see
 is the checklist of what must be in place — invariants, threat model, and test
 coverage — before engaging an auditor.
 
+Deliberate design trade-offs — things that look like missing features but
+aren't — are recorded in [docs/DECISIONS.md](docs/DECISIONS.md), starting
+with why there is no on-chain way to list a party's streams.
+
 ## Soroban SDK compatibility
 
 The contract targets Soroban SDK `25.3.2`, pinned to an exact version (`=25.3.2`) in the workspace
@@ -401,6 +405,35 @@ make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
 > `.cargo/audit.toml` because they are not compiled into the deployed WASM.
 > See [`.cargo/AUDIT.md`](.cargo/AUDIT.md) for the full explanation.
 
+### Measuring the compiled contract size
+
+The compiled WASM is what actually gets installed on-chain, and Soroban's
+install and per-invocation resource fees scale with it — a larger contract
+costs more to deploy and more to call than a smaller one. This is why the
+`[profile.release]` section of `Cargo.toml` is tuned specifically for size
+(`opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`,
+`strip = "symbols"`, `debug = 0`) rather than for compile speed or runtime
+performance; see the build-tooling entry in [CHANGELOG.md](CHANGELOG.md) for
+the full rationale behind each setting.
+
+Measure it after any change that touches the contract's code, especially
+before a deployment:
+
+```bash
+make wasm
+ls -la target/wasm32v1-none/release/tricklepay_stream.wasm
+
+# or, for just the byte count:
+wc -c < target/wasm32v1-none/release/tricklepay_stream.wasm
+```
+
+**Current size:** as of 2026-10-03, the release WASM built from this source
+is **40,808 bytes** (≈ 40 KB). There is no enforced ceiling checked in CI, so
+this number is a reference point, not a budget — treat a jump that isn't
+explained by an intentional feature addition as a regression worth
+investigating before merging, the same way `make audit` and `make check`
+surface other classes of regressions.
+
 ## Implementation details
 
 ### Ledger time as the source of truth
@@ -734,6 +767,42 @@ the persistent-entry and instance time-to-live bumps on both sides of
 
 `scripts/deploy.sh` wraps the Stellar CLI to build, install, and deploy the
 contract. It expects a funded identity configured with `stellar keys`.
+
+### What the deploying identity needs, and what it controls afterward
+
+**What it requires.** The identity used to deploy must be a Stellar account
+that already exists and holds enough native balance to cover the
+transaction's base fee and the one-time resource fee for installing the WASM
+and creating the contract instance. `stellar keys generate ... --fund` (shown
+below) satisfies this on testnet by creating the account and funding it from
+friendbot in one step; on mainnet the account must be funded through an
+ordinary payment before it can deploy anything. Nothing else is required —
+the identity does not need any pre-existing relationship with this contract,
+and does not need to hold the token that will later be streamed.
+
+**What the key controls afterward: nothing contract-specific.** This
+contract has no admin, owner, or upgrade entry point (see
+[THREAT_MODEL.md § No pause mechanism](THREAT_MODEL.md#no-pause-mechanism)
+and [§ Immutability](THREAT_MODEL.md#immutability)), so deploying it does not
+make the deploying identity a privileged account. `create_stream`,
+`withdraw`, and `cancel` all authorize against the `sender`/`recipient`
+addresses stored on each individual stream (see
+[THREAT_MODEL.md § Authorization model](THREAT_MODEL.md#authorization-model)),
+never against whoever submitted the deployment transaction. Once the deploy
+transaction lands, the deploying key has exactly the same authority over the
+contract as any other Stellar account — none — unless that same identity is
+later also named as a `sender` or `recipient` on a specific stream, in which
+case it has the authority that role carries, like any other address would.
+
+**Protect the key anyway.** Even though it holds no contract privilege
+afterward, the deploying identity is still a real, funded Stellar account,
+and the same account is often reused to deploy again later. Treat its
+custody the same way you would any other signing key that controls a stream
+participant — see
+[THREAT_MODEL.md § Key compromise](THREAT_MODEL.md#out-of-scope-risks) for
+what a compromised key can do, and the
+[Stellar CLI identity documentation](https://developers.stellar.org/docs/tools/cli)
+for how `stellar keys` stores and manages keys locally.
 
 The script takes one required argument, the name of a Stellar CLI identity.
 The network is optional. It defaults to `testnet` and is chosen with the
