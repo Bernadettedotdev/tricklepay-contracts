@@ -311,6 +311,80 @@ Format non-ABI behavior changes or bug fixes concisely:
 - `create_stream` now validates that `total_amount` does not exceed `i64::MAX`. Fixed YYYY-MM-DD.
 ```
 
+## Release process
+
+Releases are cut by the maintainers (`@TricklePay/maintainers`, see
+[CODEOWNERS](.github/CODEOWNERS)), not by the author of an individual pull
+request. A release happens when the maintainers decide the accumulated
+`## [Unreleased]` changes in `CHANGELOG.md` are ready to ship — there is no
+fixed schedule.
+
+### Cutting and tagging a release
+
+1. Confirm `main` is green: `make check` (formatting, lint, tests, audit)
+   plus `./scripts/diff-interface.sh`, so the committed `docs/interface.txt`
+   matches a fresh `make wasm` build.
+2. Pick the version number under
+   [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a breaking
+   interface change (see
+   [docs/INTEGRATOR_OPERATIONS.md § Interface Stability Policy](docs/INTEGRATOR_OPERATIONS.md#interface-stability-policy))
+   is a major bump once the project is at `1.0.0` or later; before `1.0.0`,
+   follow the usual pre-1.0 convention of treating a breaking change as a
+   minor bump and everything else as a patch.
+3. In a release commit on `main`:
+   - Rename `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`,
+     and open a new, empty `## [Unreleased]` section above it for whatever
+     comes next.
+   - Bump `version` in the workspace `Cargo.toml` to match.
+   - Run `make wasm` and record the resulting
+     `target/wasm32v1-none/release/tricklepay_stream.wasm` SHA-256 hash
+     (`sha256sum target/wasm32v1-none/release/tricklepay_stream.wasm`) in the
+     tag annotation — this is the hash anyone can later check a live
+     deployment against (see
+     [Verifying a deployment](README.md#verifying-a-deployment)).
+4. Tag that commit with an annotated tag, `vX.Y.Z`
+   (`git tag -a vX.Y.Z -m "..."`), and push it (`git push origin vX.Y.Z`).
+   The tag is what makes a specific `CHANGELOG.md` entry and a specific,
+   reproducible WASM build addressable by name.
+
+### How a tag relates to a deployed contract
+
+A tag names a point in source history, **not** a deployed contract address —
+the two are linked only through the reproducible build:
+
+- The tagged commit, built with the pinned toolchain
+  (`rust-toolchain.toml`) targeting `wasm32v1-none`, produces one specific
+  WASM binary with one specific SHA-256 hash, deterministic for that source
+  and toolchain (see
+  [Verifying a deployment](README.md#verifying-a-deployment)).
+- Deploying that WASM (`make deploy IDENTITY=...` / `scripts/deploy.sh`)
+  creates a contract at a new address — the `C...` address the deploy script
+  prints. Because the contract has no upgrade path (see
+  [docs/INTEGRATOR_OPERATIONS.md § Redeployment Without Upgradeability](docs/INTEGRATOR_OPERATIONS.md#redeployment-without-upgradeability)),
+  that address and the tag it was built from stay fixed to each other for
+  the life of that deployment.
+- The same tag can be deployed more than once — once per network (testnet,
+  mainnet, a future chain), or again on the same network if a redeployment
+  is needed — and each deployment gets its own address. There is
+  deliberately no registry inside the contract mapping tags to addresses;
+  record which tag, network, and address go together wherever deployments
+  are announced, following the migration flow in
+  [docs/INTEGRATOR_OPERATIONS.md § Redeployment Without Upgradeability](docs/INTEGRATOR_OPERATIONS.md#redeployment-without-upgradeability).
+- To check whether a live contract matches a given tag: fetch its bytecode
+  (`stellar contract fetch`), hash it, check out the tag, rebuild, and
+  compare hashes — the same procedure as
+  [Verifying a deployment](README.md#verifying-a-deployment), just starting
+  from a tag instead of a working-tree checkout.
+
+### Who performs a release
+
+Only the maintainers cut and push a release tag. This is explicitly outside
+the standard contributor pull-request flow in
+["How to open a pull request"](#how-to-open-a-pull-request) above, which ends
+at merging to `main`. A contributor's responsibility stops at an accurate
+`## [Unreleased]` entry in `CHANGELOG.md`; deciding when those changes ship,
+tagging them, and deploying from that tag is a maintainer action.
+
 ## Code of conduct
 
 Be respectful and constructive in all project spaces. See the
