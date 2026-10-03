@@ -8,6 +8,12 @@ moment; the sender can cancel and reclaim only the portion that has not yet
 vested. This is the on-chain primitive behind payroll, vesting, grants, and
 subscriptions, where value should move continuously rather than in lump sums.
 
+**All stream data is public.** Every stream's participants, schedule, and
+amounts are readable on-chain by anyone, not just the two parties involved —
+see [THREAT_MODEL.md § What a third party can observe](THREAT_MODEL.md#what-a-third-party-can-observe)
+before using this for payroll or any other arrangement where that information
+is sensitive.
+
 This repository holds the `stream` contract and its test suite. The indexer and
 web client that build on it live in separate repositories; see
 [Related repositories](#related-repositories).
