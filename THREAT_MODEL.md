@@ -62,10 +62,83 @@ new contract instance; existing streams do not move automatically.
 
 ## Authorization model
 
-Every state-changing operation is guarded by Soroban's `require_auth()`. Only
-the `sender` may call `cancel`; only the `recipient` may call `withdraw` or
-`withdraw_amount`. No other account, including any deployer or admin, holds
-any authority over a stream after it is created.
+Every state-changing entry point is guarded by Soroban's `require_auth()`,
+checked against the stream's own stored `sender` or `recipient` address — never
+against a deployer, admin, or any other privileged account, because none
+exists. Read-only views perform no authorization check at all: they alter no
+state and move no tokens, so anyone can call them for any stream id.
+
+| Entry point       | Kind      | Who may call it                | Enforced by                                                                                  |
+| ------------------ | --------- | ------------------------------- | --------------------------------------------------------------------------------------------- |
+| `create_stream`    | Mutating  | The `sender` named in the call  | `sender.require_auth()` (`contract.rs`, `create_stream`)                                      |
+| `withdraw`         | Mutating  | The stream's `recipient`        | `stream.recipient.require_auth()` (`contract.rs`, `withdraw_with`, shared by `withdraw` and `withdraw_amount`) |
+| `withdraw_amount`  | Mutating  | The stream's `recipient`        | `stream.recipient.require_auth()` (`contract.rs`, `withdraw_with`)                             |
+| `cancel`           | Mutating  | The stream's `sender`           | `stream.sender.require_auth()` (`contract.rs`, `cancel`)                                      |
+| `get_stream`       | View      | Anyone — no authorization       | none                                                                                           |
+| `withdrawable`     | View      | Anyone — no authorization       | none                                                                                           |
+| `vested`           | View      | Anyone — no authorization       | none                                                                                           |
+| `locked`           | View      | Anyone — no authorization       | none                                                                                           |
+| `progress`         | View      | Anyone — no authorization       | none                                                                                           |
+| `status`           | View      | Anyone — no authorization       | none                                                                                           |
+| `stream_count`     | View      | Anyone — no authorization       | none                                                                                           |
+
+For `create_stream`, `sender` is whoever the caller names in the arguments —
+authorization proves that address signed the transaction, not that it matches
+any prior record, since no stream exists yet. For every other mutating entry
+point, authorization is checked against the address already stored on that
+specific stream record, so a `sender` or `recipient` from one stream has no
+authority over any other stream. No entry point accepts an admin override,
+and no account other than the two parties named at creation ever gains
+authority over a stream.
+
+## What a third party can observe
+
+Everything a stream contains is public on the Stellar ledger. There is no
+mechanism in this contract — and none available to a Soroban contract in
+general — to keep a stream's participants, schedule, or amounts
+confidential from anyone who chooses to look.
+
+**What is observable, and how:**
+
+- **Every stream field, for every stream id.** `get_stream` requires no
+  authorization (see "Authorization model" above) and returns the full
+  `Stream` record — `sender`, `recipient`, `token`, `total_amount`,
+  `withdrawn`, `start_time`, `end_time`, `cliff_time`, and `cancelled` — to
+  any caller. `stream_count` reports how many ids exist, so a third party can
+  enumerate every stream ever created on a deployment by calling `get_stream`
+  for every id from `0` to `stream_count - 1`.
+- **Every event, with full participant and amount detail.** `Created` carries
+  `sender`, `recipient`, `token`, `total_amount`, and the full schedule;
+  `Withdrawn` carries `recipient` and `amount`; `Cancelled` carries `sender`,
+  `recipient_amount`, and `sender_refund` (`contracts/stream/src/events.rs`).
+  These are published on-chain for every call. Anyone running a Soroban RPC or
+  Horizon query can reconstruct a stream's full history from them without
+  ever calling the contract directly.
+- **The underlying token movements themselves.** Each deposit, withdrawal,
+  and refund is a real transfer on the streamed token's own contract (see
+  the token interface note in [README.md](README.md)), visible to that
+  token's own indexers and explorers the same way any other transfer is.
+- **Transaction-level metadata** — who submitted each transaction, when, and
+  with what fee — is part of the Stellar ledger itself, independent of
+  anything this contract does.
+
+**Amounts and addresses are not private.** The `sender` and `recipient`
+addresses, and every amount this contract tracks — the total streamed, what
+has vested, what has been withdrawn, and any refund — are plain, unencrypted
+fields in public contract storage and public events. Nothing in this
+contract or in the Soroban token interface it relies on offers a
+confidential-amount or shielded-address feature.
+
+**What this means for sensitive use cases.** A payroll run, a compensation
+grant, or any other stream reveals who is paying whom, how much, and on what
+schedule, from the moment it is created — to anyone willing to query the
+contract or read the ledger, not only to the two parties involved. Before
+streaming a salary or a sensitive payment, treat it as a published fact
+rather than a private arrangement between sender and recipient. Using a
+fresh address per stream reduces how easily that address links back to a
+real-world identity elsewhere, but it does not hide the amount, the
+schedule, or the existence of a payment relationship between whichever two
+addresses are named on the stream.
 
 ## Invariants
 

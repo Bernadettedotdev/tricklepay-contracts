@@ -3,17 +3,19 @@
 WASM_TARGET := wasm32v1-none
 WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
-.PHONY: all build wasm test fmt fmt-check lint audit clean deploy help
+.PHONY: all build wasm size test fmt fmt-check lint docs audit clean deploy help
 
 # help is the default target; running plain `make` lists available targets.
 .DEFAULT_GOAL := help
 
 # Run the same checks as CI in the same order: formatting, lints, tests.
 # Use this before opening a pull request.
-check: fmt-check lint test
+check: fmt-check lint test audit
+	./scripts/diff-interface.sh
 .PHONY: all help build wasm test fmt fmt-check lint audit clean deploy
 
-all: fmt-check lint test
+all: fmt-check lint test audit
+	./scripts/diff-interface.sh
 
 # List available targets with their descriptions.
 help:
@@ -27,6 +29,9 @@ wasm: ## Optimised WASM artifact for deployment.
 	cargo build --release --target $(WASM_TARGET)
 	@echo "built $(WASM)"
 
+size: wasm ## Report the compiled contract's WASM size (builds it first if needed).
+	@echo "$(WASM): $$(wc -c < $(WASM) | tr -d ' ') bytes ($$(du -h $(WASM) | cut -f1))"
+
 test: ## Run the full test suite.
 	cargo test
 
@@ -39,8 +44,11 @@ fmt-check: ## Verify formatting without modifying files (used in CI).
 lint: ## Lint every target and treat warnings as errors.
 	cargo clippy --all-targets -- -D warnings
 
+docs: ## Build crate documentation, treating warnings as errors.
+	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
+
 audit: ## Audit dependencies for known vulnerabilities.
-	cargo audit --deny warnings
+	cargo audit --deny warnings --file .cargo/audit.toml
 
 clean: ## Remove build artifacts.
 	cargo clean

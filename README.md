@@ -8,6 +8,12 @@ moment; the sender can cancel and reclaim only the portion that has not yet
 vested. This is the on-chain primitive behind payroll, vesting, grants, and
 subscriptions, where value should move continuously rather than in lump sums.
 
+**All stream data is public.** Every stream's participants, schedule, and
+amounts are readable on-chain by anyone, not just the two parties involved —
+see [THREAT_MODEL.md § What a third party can observe](THREAT_MODEL.md#what-a-third-party-can-observe)
+before using this for payroll or any other arrangement where that information
+is sensitive.
+
 This repository holds the `stream` contract and its test suite. The indexer and
 web client that build on it live in separate repositories; see
 [Related repositories](#related-repositories).
@@ -18,9 +24,18 @@ covers redeployment without upgradeability, interface stability, safe retry
 behavior after uncertain submissions, and the practical duration limits imposed
 by storage TTL.
 
+A formal audit is the gate between this contract and production use (see
+[SECURITY.md](SECURITY.md)). [docs/AUDIT_READINESS.md](docs/AUDIT_READINESS.md)
+is the checklist of what must be in place — invariants, threat model, and test
+coverage — before engaging an auditor.
+
+Deliberate design trade-offs — things that look like missing features but
+aren't — are recorded in [docs/DECISIONS.md](docs/DECISIONS.md), starting
+with why there is no on-chain way to list a party's streams.
+
 ## Soroban SDK compatibility
 
-The contract targets Soroban SDK `25.0.0`, pinned in the workspace
+The contract targets Soroban SDK `25.3.2`, pinned to an exact version (`=25.3.2`) in the workspace
 `Cargo.toml`. The same version is used for the contract build and its test
 host.
 
@@ -54,7 +69,7 @@ A stream is defined by a total amount and a window of time:
 - **Cliff** (optional) is a point before which nothing can be withdrawn. When
   the cliff is reached, everything accrued since the start unlocks at once and
   vesting continues linearly from there. `cliff_time` must fall inside
-  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`.
+  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`
 
   **A stream has no cliff when `cliff_time == start_time`.** There is no
   separate flag or null value to pass — the cliff is always a timestamp, and
@@ -317,6 +332,306 @@ which means tokens remain unclaimed. The `get_stream` view exposes the raw
 `withdrawn` and `total_amount` fields for a precise accounting check:
 `withdrawn == total_amount` confirms the recipient has taken everything.
 
+## Token interface
+
+The `token` address passed to `create_stream` must implement the **SEP-41
+Token Interface** — the same interface the Stellar Asset Contract (SAC)
+implements for classic Stellar assets, and the one any custom Soroban token
+should implement to be usable here. The contract talks to it through
+`soroban_sdk::token::TokenClient` (`contracts/stream/src/contract.rs`).
+
+**The only operation the contract calls is `transfer`.** It is invoked at four
+points, always moving tokens to or from the contract's own address:
+
+- `create_stream` — pulls `total_amount` from the sender into the contract.
+- `withdraw` / `withdraw_amount` — pays the recipient their vested, unwithdrawn
+  balance.
+- `cancel` — refunds the sender whatever has not yet vested.
+
+Nothing else on the token is called: no `balance`, `approve`, or `allowance`
+check, and no admin or minting function. A token that implements `transfer`
+correctly is sufficient for this contract regardless of what else it does or
+doesn't support.
+
+**Symptom of a non-conforming token.** The contract assumes `transfer` moves
+exactly the requested amount, charges no undisclosed fee, and either succeeds
+or fails atomically with no partial effect; it never re-checks balances
+afterward. A token that violates this doesn't produce a typed `StreamError` —
+there is no error variant for a bad token, because the failure is the token's,
+not the stream contract's. Instead it shows up as behavior that looks like a
+bug in this contract: a `withdraw` that reports success while the recipient
+receives less than the vesting math promised (a token that short-transfers or
+takes a fee), every call on a stream failing or reverting forever (a token
+that always traps), or unexpected reentrant behavior around a transfer (a
+token that calls back into this contract from within `transfer`). See
+[THREAT_MODEL.md § Trust assumptions about the token contract](THREAT_MODEL.md#trust-assumptions-about-the-token-contract)
+and [§ What happens when a token transfer fails](THREAT_MODEL.md#what-happens-when-a-token-transfer-fails)
+for the full breakdown and who is responsible for choosing a conforming token.
+
+## Development workflow
+
+All common contributor tasks are wrapped in the `Makefile`. Run `make` (or
+`make help`) from the repository root to list them:
+
+```
+  check      Run fmt-check, lint, and test — the same sequence CI runs.
+             Use this before opening a pull request.
+  build      Native debug build (cargo build).
+  wasm       Optimised WASM artifact for deployment.
+  test       Run the full test suite (cargo test).
+  fmt        Format the workspace in place (cargo fmt).
+  fmt-check  Verify formatting without modifying files (used in CI).
+  lint       Lint every target and treat warnings as errors (cargo clippy -D warnings).
+  audit      Audit dependencies for known vulnerabilities (cargo audit --deny warnings).
+  clean      Remove build artifacts (cargo clean).
+  deploy     Build, install, and deploy to testnet. Pass an identity: make deploy ID=alice
+```
+
+Quick reference for the most common tasks:
+
+```bash
+make check          # formatting + lints + tests (mirrors CI)
+make test           # run the test suite only
+make fmt            # auto-format all Rust source files
+make wasm           # produce the release WASM ready for deployment
+make audit          # check for vulnerable or unmaintained dependencies
+make deploy ID=alice  # deploy to testnet using a Stellar CLI identity
+```
+
+> **Dependency audit:** `make audit` runs `cargo audit --deny warnings`.
+> Some transitive Soroban test-host dependencies are allowlisted in
+> `.cargo/audit.toml` because they are not compiled into the deployed WASM.
+> See [`.cargo/AUDIT.md`](.cargo/AUDIT.md) for the full explanation.
+
+### Reading the test suite
+
+The suite is organised by behaviour, not by entry point, so a failing test
+points at which part of the contract's rules broke rather than just which
+function was called. It lives in two places:
+
+- **`contracts/stream/src/vesting.rs`** has its own `#[cfg(test)] mod tests`
+  testing the vesting arithmetic in isolation, with no contract or ledger
+  environment involved: fixed-example unit tests
+  (`nothing_vests_before_start`, `cliff_releases_accrued_amount_at_once`,
+  `integer_division_rounds_down`) plus a `proptest!` block
+  (`vested_between_zero_and_total`, `vested_is_monotonic_in_now`,
+  `withdrawable_equals_vested_minus_withdrawn_when_withdrawn_le_vested`) that
+  checks those same properties hold across randomly generated schedules and
+  timestamps, not just the handful of examples above them.
+- **`contracts/stream/src/tests/`** has the integration suite, run against
+  the generated contract client, split into one file per functional area.
+  The table below names where to look for each behaviour; it mirrors the
+  module doc comment at the top of
+  [`tests/mod.rs`](contracts/stream/src/tests/mod.rs), which is the
+  authoritative, always-current version of this list.
+
+| File              | Covers                                                                                           | Representative tests                                                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `creation.rs`     | `create_stream` validation: schedule and amount bounds, participant checks, id-counter exhaustion, deterministic validation order | `create_stream_rejects_invalid_parameters`, `create_stream_rejects_amount_above_max`, `create_stream_rejects_the_contract_as_recipient`, `create_stream_validation_order_is_deterministic`, `stream_id_counter_overflow_fails_closed` |
+| `withdrawal.rs`   | `withdraw`/`withdraw_amount`: stepwise vesting, cliff gating, partial draws, exact-end and exact-cliff boundaries, double-withdraw and unknown-id guards | `withdraw_releases_vested_in_steps`, `cliff_blocks_withdrawal_until_reached`, `withdraw_amount_available_plus_one_receives_insufficient_balance`, `operations_on_unknown_stream_report_not_found` |
+| `cancellation.rs` | `cancel`: the vested/refund split, boundary timing (start, cliff, end), rejecting a second cancel or one after completion | `cancel_refunds_unvested_and_preserves_vested`, `cancel_with_cliff_not_reached`, `cancel_on_stream_at_end_time_is_rejected`, `test_repeated_cancel_fails` |
+| `views.rs`        | Read-only queries (`progress`, `locked`, `status`, etc.): monotonicity over time, correctness on a cancelled stream, no state or event side effects | `progress_never_decreases_as_time_advances`, `locked_never_goes_negative_across_sampled_times`, `views_are_correct_on_a_cancelled_stream`, `test_view_functions_publish_no_events` |
+| `events.rs`       | Event ordering and topic correctness for every entry point, and silence on a rejected call        | `create_emits_created_after_the_funding_transfer`, `lifecycle_events_follow_operation_order`, `created_event_topics_index_sender_and_recipient`, `rejected_create_publishes_no_events` |
+| `storage.rs`      | `DataKey` encoding across the id range, and persistent/instance TTL bumps on both sides of `BUMP_THRESHOLD` | `stream_ids_map_to_distinct_persistent_keys`, `a_stream_entry_ttl_decays_with_the_ledger_sequence`, `withdrawing_restores_a_decayed_stream_ttl`, `view_calls_do_not_extend_the_instance_ttl` |
+| `auth.rs`         | Authorization requirements for every mutating entry point                                         | `withdraw_requires_recipient_authorization`, `cancel_requires_sender_authorization`, `test_third_party_cannot_mutate_streams`              |
+| `helpers.rs`      | Not tests itself — the `StreamTest` fixture and clock helpers (`set_time`, `set_sequence`) every file above builds on | —                                                                                                                                             |
+
+If you are trying to understand a specific rule — what exactly happens at an
+exact cliff, how a cancellation splits funds, what a rejected call leaves
+behind — the fastest path is usually to search these files for the behaviour
+by name rather than re-reading `contract.rs`; the test names are written to
+describe the rule, not the function under test. See
+[CONTRIBUTING.md § Writing a test for a new behaviour](CONTRIBUTING.md#writing-a-test-for-a-new-behaviour)
+for the conventions a new test should follow.
+
+### Measuring the compiled contract size
+
+The compiled WASM is what actually gets installed on-chain, and Soroban's
+install and per-invocation resource fees scale with it — a larger contract
+costs more to deploy and more to call than a smaller one. This is why the
+`[profile.release]` section of `Cargo.toml` is tuned specifically for size
+(`opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`,
+`strip = "symbols"`, `debug = 0`) rather than for compile speed or runtime
+performance; see the build-tooling entry in [CHANGELOG.md](CHANGELOG.md) for
+the full rationale behind each setting.
+
+Measure it after any change that touches the contract's code, especially
+before a deployment:
+
+```bash
+make wasm
+ls -la target/wasm32v1-none/release/tricklepay_stream.wasm
+
+# or, for just the byte count:
+wc -c < target/wasm32v1-none/release/tricklepay_stream.wasm
+```
+
+**Current size:** as of 2026-10-03, the release WASM built from this source
+is **40,808 bytes** (≈ 40 KB). There is no enforced ceiling checked in CI, so
+this number is a reference point, not a budget — treat a jump that isn't
+explained by an intentional feature addition as a regression worth
+investigating before merging, the same way `make audit` and `make check`
+surface other classes of regressions.
+
+## Implementation details
+
+### Ledger time as the source of truth
+
+Vesting uses the **ledger close time** (`env.ledger().timestamp()`) rather than wall clock time. This means vesting advances in discrete steps tied to ledger closes, not continuously. The Stellar ledger closes roughly every 5 seconds, so a stream's vested balance jumps forward in 5-second increments rather than updating smoothly every millisecond.
+
+**Practical implications:**
+
+- A client showing a countdown or live vesting progress bar should be aware that the on-chain state updates in ledger-sized steps. A smooth countdown on the client side is a UI convenience — it does not reflect how the contract sees time.
+- **No off-chain process or keeper is required.** The contract reads the current ledger time whenever a view or mutating call is made, so vesting progresses automatically without any external automation or scheduled job.
+- When you call `vested(id)` or `withdrawable(id)`, the result is computed from the ledger timestamp at that instant. Two calls in the same transaction see the same time; two calls in different ledgers may see different vested amounts even if only seconds have elapsed.
+
+**Reference point for clients:** When deriving remaining time or vested amount in your application, use the ledger timestamp returned by the network as your reference point, not the local system clock. Query the ledger time alongside the stream state to ensure your calculations match what the contract will report on the next call.
+
+### Deriving the remaining time
+
+To show how much time is left in a stream, a client must compute the remaining duration from the stream's schedule fields. Doing this consistently with the contract's own arithmetic requires using the same reference point: the **ledger close time** (`env.ledger().timestamp()`), not the client's wall clock.
+
+**Formula:**
+
+```
+remaining_seconds = end_time - now
+```
+
+where `now` is the current ledger timestamp. If `now >= end_time`, the stream is fully vested and `remaining_seconds` is zero (or negative, which should be clamped to zero for display).
+
+**Worked example:**
+
+Using a stream with `start_time = 1735689600` (1 Jan 2025), `end_time = 1738368000` (1 Feb 2025), queried at ledger time `now = 1737072000` (17 Jan 2025):
+
+```
+remaining_seconds = 1738368000 - 1737072000 = 1296000 seconds
+remaining_days = 1296000 / 86400 = 15 days
+```
+
+The stream has 15 days remaining until it is fully vested.
+
+**Important:** Always query the ledger time from the Stellar network (via an RPC call or by inspecting the latest ledger header) and use that value as `now`. Using `Date.now()` or a local system clock introduces skew — your countdown might say "5 seconds left" while the contract still reports 10 seconds, or vice versa, because your clock differs from the validator's consensus time.
+
+**Converting to human-readable units:**
+
+```
+remaining_days = remaining_seconds / 86400
+remaining_hours = (remaining_seconds % 86400) / 3600
+remaining_minutes = (remaining_seconds % 3600) / 60
+```
+
+All division is integer division; the remainder is discarded. For a smooth countdown in a UI, you can interpolate between ledger updates, but always resync to the true ledger time on each new ledger close to avoid drift.
+
+### Rounding direction
+
+Integer division in the vesting formula **truncates** (rounds down), which means fractional tokens are never credited early. The formula `total_amount * elapsed / duration` discards any remainder from the division, so the vested amount is always the floor of the mathematically exact value.
+
+**Which party does this favor?**
+
+Rounding down **favors the sender** (and delays the recipient). A fractional token that has partially vested is not yet withdrawable by the recipient. It only becomes available once enough additional time has passed to push the vested amount over the next whole-token boundary.
+
+**Maximum size of the difference:**
+
+The rounding error per calculation is **less than 1 unit** of the token. Because the contract never adds a fractional result to `withdrawn` or anywhere else, the difference between the true mathematical vested amount and the truncated integer amount is bounded by `0 ≤ error < 1`. Over the life of a stream, this sub-unit remainder may accumulate across multiple vesting steps, but the recipient receives the correct total by the `end_time` because the final calculation `vested_amount(total_amount, start_time, end_time, cliff_time, end_time)` returns exactly `total_amount` with no division.
+
+**Practical impact:**
+
+For a token with 7 decimals (like USDC on Stellar, where 1 USDC = 10⁷ stroops), the maximum rounding difference is 0.0000001 USDC — economically negligible. For a stream of 1,000 tokens over 1,000,000 seconds, the recipient might be short by a fraction of a stroop at any given instant, but will receive the full 1,000 tokens by the end.
+
+**Example:**
+
+Stream of 10 tokens over 3 seconds, queried at `now = start_time + 1`:
+
+```
+vested = 10 * 1 / 3 = 3.333... → truncated to 3
+```
+
+The recipient can withdraw 3 tokens, not 3.333. The remaining 0.333 tokens are still locked and will vest as time progresses. At `now = start_time + 2`:
+
+```
+vested = 10 * 2 / 3 = 6.666... → truncated to 6
+```
+
+At `end_time`:
+
+```
+vested = 10 * 3 / 3 = 10 (exact, no truncation)
+```
+
+The truncation never causes the recipient to lose tokens — it only delays when fractional amounts become available.
+
+### Full amount escrowed at creation
+
+When a stream is created, the **entire `total_amount` is transferred from the sender to the contract** in the same transaction. This is a deliberate design choice that removes the need for the recipient to trust the sender's future behavior.
+
+**Why escrow the full amount up front?**
+
+1. **Trustless guarantee for the recipient:** The recipient is guaranteed that the tokens exist and are locked in the contract for the duration of the stream. There is no risk that the sender will fail to pay, run out of funds, or renege on the agreement. The vested amount is always claimable, regardless of what the sender does afterward.
+
+2. **Simplifies the contract:** Because the contract holds the full amount, it does not need to handle partial funding, top-ups, or the complexity of a sender failing to deliver. Every stream is fully funded from the moment it is created, so the vesting logic is purely time-based arithmetic with no external dependencies.
+
+3. **Enables cancellation refunds:** The sender can cancel a stream and immediately receive the unvested remainder back. This is only possible because the full amount is already in the contract — there is no need to track or enforce future payments.
+
+**Trade-off: capital cost to the sender:**
+
+The sender must **lock the full amount up front**, which means that capital is not available for other uses during the stream's lifetime. For a one-year stream of 120,000 tokens, the sender must have 120,000 tokens free at creation time, even though the recipient will draw them down gradually over the year.
+
+This is the price of the trustless guarantee. The sender is giving up liquidity in exchange for the ability to cancel and reclaim the unvested portion at any point. If the sender cannot afford to lock the full amount, a stream is not the right primitive — a manual payment schedule or a different escrow arrangement would be needed instead.
+
+**Comparison to alternatives:**
+
+- **Pay-as-you-go:** The sender transfers tokens at regular intervals (e.g., monthly payroll). This preserves sender liquidity but requires the recipient to trust that future payments will arrive. If the sender stops paying, the recipient has no recourse.
+- **Incremental escrow:** The contract pulls tokens from the sender as they vest. This reduces the sender's locked capital but adds complexity: the contract must handle insufficient balances, failed transfers, and partial funding. It also weakens the recipient's guarantee — tokens might not be available when they vest.
+- **Full escrow (this design):** The sender locks everything up front, the recipient is guaranteed every vested token, and the contract logic is simple and trust-minimized. The sender retains the right to cancel and reclaim unvested funds, so the capital is not fully at risk.
+
+The full-escrow model is the right fit for use cases where the recipient needs a strong guarantee (employee compensation, vesting grants, subscription prepayment) and the sender can afford to lock the capital. For scenarios where liquidity is more important than trustlessness, a different mechanism would be more appropriate.
+
+### `locked`: a precise figure, not a synonym for "still escrowed"
+
+"Locked" and "unvested" get used interchangeably in conversation, but
+`locked(id)` reports one specific number:
+
+```
+locked = max(total_amount - vested_amount(now), 0)
+```
+
+This is **the unvested remainder of the schedule** — the portion time has
+not reached yet — not "everything this stream still holds in the contract."
+Those are two different figures that happen to be equal only part of the
+time.
+
+**How it relates to the escrowed balance.** At any moment, what a stream
+still has sitting in the contract is `total_amount - withdrawn`, and that
+splits into two independent pieces:
+
+- `locked` — vested amount, not yet claimable by anyone.
+- `withdrawable` — vested but not yet withdrawn, claimable by the recipient
+  right now.
+
+`locked + withdrawable == total_amount - withdrawn` holds at every point in
+an active stream's life (this is exactly the split `vesting::settlement`
+computes for `cancel`). A fully vested stream whose recipient has not yet
+withdrawn reports `locked = 0` while still holding its entire remaining
+balance in escrow — that balance shows up in `withdrawable`, not `locked`.
+So `locked == 0` means "nothing left to vest," never "nothing left in the
+contract."
+
+`locked` is also exactly what `cancel` would refund the sender right now —
+cancellation returns the unvested remainder, which is this figure at the
+instant of cancellation.
+
+**How cancellation changes what `locked` means.** `cancel` refunds the
+current `locked` value to the sender, then freezes the stream: `total_amount`
+is cut down to the vested amount at that instant and `end_time` is set to
+`now` (see
+[THREAT_MODEL.md § Invariants](THREAT_MODEL.md#invariants)). Recomputing
+`vested_amount` for any later time then returns that same frozen total, so
+`locked` is `0` forever after — but for a different reason than it was `0`
+at full vesting: there is no schedule left to run, not because the contract
+already paid out everything for that stream. A cancelled stream's
+vested-but-unwithdrawn balance, if the recipient has not claimed it yet,
+still exists in escrow and is reported by `withdrawable`, not `locked`.
+
 ## Events
 
 Every mutating entry point publishes a Soroban event when it succeeds. Rejected
@@ -516,27 +831,51 @@ The audit ignores the unmaintained `derivative` and `paste` crates
 and are not used in the deployed WASM. Vulnerability advisories remain enabled;
 see `.cargo/audit.toml` for the allowlist.
 
-The suite covers the vesting math in isolation and the contract end to end:
-stepwise withdrawal, partial withdrawal and its over-request and non-positive
-guards, cliff gating, cancellation splits, the `locked` and `progress` views
-across a stream's life, the cliff and no-cliff schedules documented above,
-authorization requirements, invalid input, past and
-boundary time-window rejection, backdated-start acceptance, multiple token
-parallel streams, id-counter exhaustion at the `u64::MAX` boundary, rejection
-of the contract's own address in each participant role, self-streams, the
-documented precedence between validation groups, and double-withdraw and unknown-id guards.
-
-It also covers the storage and event behaviour described above: the order in
-which each entry point moves tokens and publishes its event, the indexed
-event topics, the silence of a rejected call on the event stream, `DataKey`
-encoding across the id range, and
-the persistent-entry and instance time-to-live bumps on both sides of
-`BUMP_THRESHOLD`.
+The suite covers the vesting math in isolation and the contract end to end,
+including the storage and event behaviour described above. See
+[Reading the test suite](#reading-the-test-suite) for which file and which
+named test covers a given behaviour.
 
 ## Deploying to testnet
 
 `scripts/deploy.sh` wraps the Stellar CLI to build, install, and deploy the
 contract. It expects a funded identity configured with `stellar keys`.
+
+### What the deploying identity needs, and what it controls afterward
+
+**What it requires.** The identity used to deploy must be a Stellar account
+that already exists and holds enough native balance to cover the
+transaction's base fee and the one-time resource fee for installing the WASM
+and creating the contract instance. `stellar keys generate ... --fund` (shown
+below) satisfies this on testnet by creating the account and funding it from
+friendbot in one step; on mainnet the account must be funded through an
+ordinary payment before it can deploy anything. Nothing else is required —
+the identity does not need any pre-existing relationship with this contract,
+and does not need to hold the token that will later be streamed.
+
+**What the key controls afterward: nothing contract-specific.** This
+contract has no admin, owner, or upgrade entry point (see
+[THREAT_MODEL.md § No pause mechanism](THREAT_MODEL.md#no-pause-mechanism)
+and [§ Immutability](THREAT_MODEL.md#immutability)), so deploying it does not
+make the deploying identity a privileged account. `create_stream`,
+`withdraw`, and `cancel` all authorize against the `sender`/`recipient`
+addresses stored on each individual stream (see
+[THREAT_MODEL.md § Authorization model](THREAT_MODEL.md#authorization-model)),
+never against whoever submitted the deployment transaction. Once the deploy
+transaction lands, the deploying key has exactly the same authority over the
+contract as any other Stellar account — none — unless that same identity is
+later also named as a `sender` or `recipient` on a specific stream, in which
+case it has the authority that role carries, like any other address would.
+
+**Protect the key anyway.** Even though it holds no contract privilege
+afterward, the deploying identity is still a real, funded Stellar account,
+and the same account is often reused to deploy again later. Treat its
+custody the same way you would any other signing key that controls a stream
+participant — see
+[THREAT_MODEL.md § Key compromise](THREAT_MODEL.md#out-of-scope-risks) for
+what a compromised key can do, and the
+[Stellar CLI identity documentation](https://developers.stellar.org/docs/tools/cli)
+for how `stellar keys` stores and manages keys locally.
 
 The script takes one required argument, the name of a Stellar CLI identity.
 The network is optional. It defaults to `testnet` and is chosen with the

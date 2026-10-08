@@ -15,11 +15,39 @@ position. Every addition or removal of a field is marked **ABI**.
 Entry points (callable functions) are part of the public ABI. Every addition
 is marked **ABI**.
 
+## How to read this changelog
+
+Entries are grouped under the standard Keep a Changelog headings — **Added**,
+**Changed**, **Removed**, **Fixed** — which describe the *nature* of a change,
+not whether it affects you. To find out which entries can affect you, look at
+the inline **ABI** tag on each entry, not at the section heading it sits
+under:
+
+- **Added** and **Removed** entries below are always interface changes:
+  introducing or retiring an error code, event field, or entry point is
+  inherently a public-ABI change, so every entry under those two headings
+  carries the **ABI** tag.
+- **Changed** and **Fixed** entries are mixed. Some change the interface (an
+  event payload gaining a field, a previously-unreachable error code becoming
+  reachable); others are internal only (a build-profile tweak, a README
+  clarification, a bug fix that doesn't change what the contract returns).
+  Judge each one by its own **ABI** tag rather than the heading — a `Fixed
+  (non-ABI)` section, for example, can still contain individual entries tagged
+  **ABI** when the fix is what makes a new error code reachable.
+
+If you maintain a generated client, SDK, or indexer that matches on error
+codes, decodes event topics or fields, or calls an entry point directly, the
+**ABI**-tagged entries are the ones that can require a change on your side.
+Entries without the tag are safe to skip for that purpose.
+
 ## [Unreleased]
 
 Nothing has been released yet and no version is tagged; `0.1.0` is still in
 development. All changes below are unreleased and recorded here so downstream
-consumers have a single document to track.
+consumers have a single document to track. See
+[CONTRIBUTING.md § Release process](CONTRIBUTING.md#release-process) for how
+this section turns into a tagged release and how a tag relates to a deployed
+contract.
 
 ### Changed
 

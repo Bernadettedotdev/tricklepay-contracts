@@ -316,13 +316,7 @@ impl StreamContract {
         if now >= stream.end_time {
             return Err(StreamError::StreamAlreadyCompleted);
         }
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            now,
-        );
+        let vested = stream.vested_amount(now);
         let settlement = vesting::settlement(stream.total_amount, vested, stream.withdrawn);
 
         // Freeze the stream at the vested amount. With the total reduced to
@@ -385,13 +379,7 @@ impl StreamContract {
     /// ```
     pub fn withdrawable(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        );
+        let vested = stream.vested_amount(env.ledger().timestamp());
         Ok(vesting::withdrawable_amount(vested, stream.withdrawn))
     }
 
@@ -404,13 +392,7 @@ impl StreamContract {
     /// ```
     pub fn vested(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        Ok(vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        ))
+        Ok(stream.vested_amount(env.ledger().timestamp()))
     }
 
     /// Amount not yet vested: the portion still locked in the contract that the
@@ -434,13 +416,7 @@ impl StreamContract {
     /// ```
     pub fn locked(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        );
+        let vested = stream.vested_amount(env.ledger().timestamp());
         Ok((stream.total_amount - vested).max(0))
     }
 
@@ -469,13 +445,7 @@ impl StreamContract {
         if stream.total_amount == 0 {
             return Ok(BPS_SCALE);
         }
-        let vested = vesting::vested_amount(
-            stream.total_amount,
-            stream.start_time,
-            stream.end_time,
-            stream.cliff_time,
-            env.ledger().timestamp(),
-        );
+        let vested = stream.vested_amount(env.ledger().timestamp());
         let scale = i128::from(BPS_SCALE);
         let progress = vested * scale / stream.total_amount;
         Ok(u32::try_from(progress.clamp(0, scale)).unwrap_or(0))
@@ -530,13 +500,7 @@ fn withdraw_with(
     let mut stream = storage::get_stream(env, id).ok_or(StreamError::StreamNotFound)?;
     stream.recipient.require_auth();
 
-    let vested = vesting::vested_amount(
-        stream.total_amount,
-        stream.start_time,
-        stream.end_time,
-        stream.cliff_time,
-        env.ledger().timestamp(),
-    );
+    let vested = stream.vested_amount(env.ledger().timestamp());
     let amount = select(vesting::withdrawable_amount(vested, stream.withdrawn))?;
 
     stream.withdrawn += amount;

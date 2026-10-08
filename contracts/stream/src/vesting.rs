@@ -214,7 +214,10 @@ mod tests {
         assert_eq!(vested_amount(total, start, end, start, start + 1), 0);
         assert_eq!(vested_amount(total, start, end, start, end - 1), 0);
         assert_eq!(vested_amount(total, start, end, start, end), 1);
-        assert_eq!(withdrawable_amount(vested_amount(total, start, end, start, end), 0), 1);
+        assert_eq!(
+            withdrawable_amount(vested_amount(total, start, end, start, end), 0),
+            1
+        );
     }
 
     #[test]

@@ -41,12 +41,19 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo audit --deny warnings
+./scripts/diff-interface.sh
 ```
 
 > **Tip:** You can use the project's cargo aliases (defined in `.cargo/config.toml`) for shorter commands: `cargo fmt-check`, `cargo lint`, and `cargo test`. These run the exact same checks as the `Makefile` targets.
 
 CI runs the same checks on every push and pull request. The audit command uses the
 allowlist in `.cargo/audit.toml`.
+
+If you intentionally changed the contract interface, update the snapshot before opening your PR:
+```bash
+make wasm
+stellar contract inspect --wasm target/wasm32v1-none/release/tricklepay_stream.wasm > docs/interface.txt
+```
 
 ## Testing
 
@@ -59,7 +66,7 @@ moves time forward by assigning it. Time in a test is therefore a value you
 choose, not a value that drifts.
 
 The contracts have two clocks, and `StreamTest` in
-[`contracts/stream/src/test.rs`](contracts/stream/src/test.rs) exposes a helper
+[`contracts/stream/src/tests/helpers.rs`](contracts/stream/src/tests/helpers.rs) exposes a helper
 for each:
 
 | Helper | Underlying call | Use it for |
@@ -117,6 +124,115 @@ host timestamp would break the assumption the rest of the suite relies on, and
 could let a regression that reintroduced wall-clock time into the contract pass
 unnoticed.
 
+### Writing a test for a new behaviour
+
+All tests live in [`contracts/stream/src/tests/`](contracts/stream/src/tests/)
+ — the suite is split into one module per area (see `tests/mod.rs`), so the fastest way to learn its conventions is to read
+the tests around the behaviour you are touching. `StreamTest::setup` builds the
+whole environment for you: a registered stream contract, a Stellar asset
+token, a sender funded with the balance you pass, and `mock_all_auths()` so
+calls do not need signatures.
+
+A new test is usually four steps:
+
+1. **Build the fixture.** `StreamTest::setup(sender_balance)` returns `t`, a
+   struct with the contract client (`t.contract`), the token client (`t.token`),
+   the participant addresses (`t.sender`, `t.recipient`), and the clock helpers.
+2. **Pin the clock, then create the stream.** Call `t.set_time(...)` before
+   `create_stream`: the contract rejects a window whose end is already in the
+   past, so the schedule only exists once the clock is where you want it. Most
+   tests use the window `start = 100`, `end = 1_100` with `cliff = 100`, which
+   is the no-cliff case (`cliff_time == start_time`). Pass explicit timestamps
+   as plain numbers rather than computing them from the current time.
+3. **Act and assert on the schedule.** Advance the clock with `t.set_time(...)`
+   to each point of interest — before the start, at a cliff, the midpoint, the
+   exact end, past the end — and assert the exact amount at each step with
+   `assert_eq!`. Put a comment above each step naming the moment, as
+   `withdraw_releases_vested_in_steps` (the reference example above) does.
+4. **Assert rejections change nothing.** For a call that must fail, use the
+   generated `try_` client method and expect the typed error, then assert the
+   balances and stored state are untouched:
+
+   ```rust
+   let balance_before = t.token.balance(&t.recipient);
+   assert_eq!(
+       t.contract.try_withdraw_amount(&id, &400),
+       Err(Ok(StreamError::InsufficientBalance))
+   );
+   assert_eq!(t.token.balance(&t.recipient), balance_before);
+   ```
+
+   The double `Err(Ok(...))` shape is how the SDK client reports a contract
+   error from a `try_` call: outer layer for the invocation, inner for the
+   decoded `StreamError`. Never assert on panics for errors the contract
+   returns as values.
+
+Putting it together — a test that the cliff withholds everything until
+`cliff_time` and then releases the accrued amount at once:
+
+```rust
+/// Withholding before the cliff, then the one-step release at the cliff.
+#[test]
+fn nothing_is_withdrawable_before_the_cliff() {
+    // A fresh contract, token, and funded sender; auth is mocked.
+    let t = StreamTest::setup(1_000);
+
+    // Pin the clock before creating the stream: the schedule's end must
+    // be in the future at creation.
+    t.set_time(100);
+
+    // The standard window [100, 1100] with the cliff at 600. Cliff equal
+    // to start (100) would be the no-cliff case.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &600,
+    );
+
+    // Past the start, before the cliff: the gate withholds everything.
+    t.set_time(300);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // At the cliff the accrued amount unlocks at once and vesting
+    // continues linearly from there.
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.withdraw(&id), 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+}
+```
+
+Conventions the suite expects:
+
+- **Name the behaviour, not the entry point.** `withdraw_at_exact_end`, not
+  `test_withdraw_2`. A reader should know what passing means from the name.
+- **Give every test a doc comment** stating the property it pins, like the
+  tests around the storage TTL do.
+- **Timestamps are values you choose.** Write `100` and `1_100` directly;
+  never derive a timestamp from another reading of the clock.
+- **Assert on state, not just return values.** Pair an amount with the token
+  balances (`t.token.balance(&t.recipient)`, `t.token.balance(&t.contract.address)`)
+  so a transfer bug cannot hide behind a correct number.
+- **Prefer a fixture helper before reaching for the raw ledger API.**
+  `StreamTest` also exposes `set_sequence` for ledger lifetimes, and storage
+  introspection such as `stream_ttl`, `persistent_has`, and `set_stream_count`
+  for boundary cases no entry point can reach; read the fixture in
+  `tests/helpers.rs` before duplicating one of them.
+
+For events, use the fixture helpers instead of decoding XDR by hand:
+`event_publishers()` returns who published the latest invocation's events in
+order (the token contract's transfer, then the stream contract's own event),
+and `assert_latest_stream_event_topics` compares the latest event's topics and
+data against an expected `ContractEvent`.
+
+When you are done, run the required checks above — `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings`, and `cargo test`, or
+`make check` for all three — before opening the pull request.
+
 ## Commit messages
 
 Start every commit subject with a type prefix, a colon, and a short summary in
@@ -158,8 +274,16 @@ change. Reference the issue in the commit body or the pull request description
 3. If your change modifies contract ABI, user-facing behavior, or fixes a bug, update `CHANGELOG.md` per the guidelines below.
 4. Push the branch to your fork and open a pull request against `main`.
 5. Describe the change, the motivation, and how you verified it, and link the
-   issue you are addressing (for example `Closes #123`).
+   issue you are addressing (for example `Closes #123`). If your pull request modifies contract logic, ensure it meets the [Contract change checklist](#contract-change-checklist).
 6. Be responsive to review feedback; follow-up commits during review are fine.
+
+## Contract change checklist
+
+When your pull request changes contract logic or interface, please verify:
+
+- [ ] **Tests:** New or changed behavior is covered by tests that control the ledger clock explicitly.
+- [ ] **Changelog:** The change is documented in `CHANGELOG.md` following the guidelines below.
+- [ ] **Interface:** If the contract interface changed, the snapshot in `docs/interface.txt` has been updated and `make check` passes.
 
 ## Updating the changelog
 
@@ -186,6 +310,80 @@ Format non-ABI behavior changes or bug fixes concisely:
 - Clarified README around cliff/no-cliff semantics so stream boundaries are easier to reason about.
 - `create_stream` now validates that `total_amount` does not exceed `i64::MAX`. Fixed YYYY-MM-DD.
 ```
+
+## Release process
+
+Releases are cut by the maintainers (`@TricklePay/maintainers`, see
+[CODEOWNERS](.github/CODEOWNERS)), not by the author of an individual pull
+request. A release happens when the maintainers decide the accumulated
+`## [Unreleased]` changes in `CHANGELOG.md` are ready to ship — there is no
+fixed schedule.
+
+### Cutting and tagging a release
+
+1. Confirm `main` is green: `make check` (formatting, lint, tests, audit)
+   plus `./scripts/diff-interface.sh`, so the committed `docs/interface.txt`
+   matches a fresh `make wasm` build.
+2. Pick the version number under
+   [Semantic Versioning](https://semver.org/spec/v2.0.0.html): a breaking
+   interface change (see
+   [docs/INTEGRATOR_OPERATIONS.md § Interface Stability Policy](docs/INTEGRATOR_OPERATIONS.md#interface-stability-policy))
+   is a major bump once the project is at `1.0.0` or later; before `1.0.0`,
+   follow the usual pre-1.0 convention of treating a breaking change as a
+   minor bump and everything else as a patch.
+3. In a release commit on `main`:
+   - Rename `## [Unreleased]` in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`,
+     and open a new, empty `## [Unreleased]` section above it for whatever
+     comes next.
+   - Bump `version` in the workspace `Cargo.toml` to match.
+   - Run `make wasm` and record the resulting
+     `target/wasm32v1-none/release/tricklepay_stream.wasm` SHA-256 hash
+     (`sha256sum target/wasm32v1-none/release/tricklepay_stream.wasm`) in the
+     tag annotation — this is the hash anyone can later check a live
+     deployment against (see
+     [Verifying a deployment](README.md#verifying-a-deployment)).
+4. Tag that commit with an annotated tag, `vX.Y.Z`
+   (`git tag -a vX.Y.Z -m "..."`), and push it (`git push origin vX.Y.Z`).
+   The tag is what makes a specific `CHANGELOG.md` entry and a specific,
+   reproducible WASM build addressable by name.
+
+### How a tag relates to a deployed contract
+
+A tag names a point in source history, **not** a deployed contract address —
+the two are linked only through the reproducible build:
+
+- The tagged commit, built with the pinned toolchain
+  (`rust-toolchain.toml`) targeting `wasm32v1-none`, produces one specific
+  WASM binary with one specific SHA-256 hash, deterministic for that source
+  and toolchain (see
+  [Verifying a deployment](README.md#verifying-a-deployment)).
+- Deploying that WASM (`make deploy IDENTITY=...` / `scripts/deploy.sh`)
+  creates a contract at a new address — the `C...` address the deploy script
+  prints. Because the contract has no upgrade path (see
+  [docs/INTEGRATOR_OPERATIONS.md § Redeployment Without Upgradeability](docs/INTEGRATOR_OPERATIONS.md#redeployment-without-upgradeability)),
+  that address and the tag it was built from stay fixed to each other for
+  the life of that deployment.
+- The same tag can be deployed more than once — once per network (testnet,
+  mainnet, a future chain), or again on the same network if a redeployment
+  is needed — and each deployment gets its own address. There is
+  deliberately no registry inside the contract mapping tags to addresses;
+  record which tag, network, and address go together wherever deployments
+  are announced, following the migration flow in
+  [docs/INTEGRATOR_OPERATIONS.md § Redeployment Without Upgradeability](docs/INTEGRATOR_OPERATIONS.md#redeployment-without-upgradeability).
+- To check whether a live contract matches a given tag: fetch its bytecode
+  (`stellar contract fetch`), hash it, check out the tag, rebuild, and
+  compare hashes — the same procedure as
+  [Verifying a deployment](README.md#verifying-a-deployment), just starting
+  from a tag instead of a working-tree checkout.
+
+### Who performs a release
+
+Only the maintainers cut and push a release tag. This is explicitly outside
+the standard contributor pull-request flow in
+["How to open a pull request"](#how-to-open-a-pull-request) above, which ends
+at merging to `main`. A contributor's responsibility stops at an accurate
+`## [Unreleased]` entry in `CHANGELOG.md`; deciding when those changes ship,
+tagging them, and deploying from that tag is a maintainer action.
 
 ## Code of conduct
 

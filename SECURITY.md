@@ -75,4 +75,6 @@ every token locked in a stream is exposed to any vulnerability in the deployed
 code for the full duration of that stream. The sender's `cancel` is the only
 unilateral escape, and it only recovers the unvested remainder.
 
-Full details are in [THREAT_MODEL.md](THREAT_MODEL.md).
+Full details are in [THREAT_MODEL.md](THREAT_MODEL.md). The checklist of what
+must be in place before a formal audit — invariants, threat model currency,
+and test coverage — is [docs/AUDIT_READINESS.md](docs/AUDIT_READINESS.md).
